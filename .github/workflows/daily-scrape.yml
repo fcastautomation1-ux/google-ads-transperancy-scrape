@@ -26,7 +26,9 @@ jobs:
       
       - name: Create credentials file
         run: |
-          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+          cat > credentials.json << EOF
+          ${{ secrets.GOOGLE_CREDENTIALS }}
+          EOF
         shell: bash
       
       - name: Run scraping script
