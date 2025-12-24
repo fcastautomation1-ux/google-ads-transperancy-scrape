@@ -1,15 +1,24 @@
-name: Daily Google Ads Scraping
+name: 24/7 Google Ads Scraping
 
 on:
   schedule:
-    # Runs daily at 9:00 AM Pakistan Time (4:00 AM UTC)
+    # Runs 4 times per day (every 6 hours) for 24/7 coverage
+    # Each run processes for 5h 55m, then stops for 5 minutes before next run
     # Pakistan Time is UTC+5
-    - cron: '0 4 * * *'
+    # Run 1: 5:00 AM PKT (00:00 UTC)
+    - cron: '0 0 * * *'
+    # Run 2: 11:00 AM PKT (06:00 UTC)
+    - cron: '0 6 * * *'
+    # Run 3: 5:00 PM PKT (12:00 UTC)
+    - cron: '0 12 * * *'
+    # Run 4: 11:00 PM PKT (18:00 UTC)
+    - cron: '0 18 * * *'
   workflow_dispatch: # Allows manual triggering
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 355 # 5 hours 55 minutes - stops before 6-hour GitHub limit
     
     steps:
       - name: Checkout repository
@@ -30,6 +39,12 @@ jobs:
           ${{ secrets.GOOGLE_CREDENTIALS }}
           EOF
         shell: bash
+      
+      - name: Log run start
+        run: |
+          echo "🚀 Starting scraping run at $(date)"
+          echo "⏰ This run will process URLs for up to 5h 55m"
+          echo "🔄 Next run will start in 6 hours"
       
       - name: Run scraping script
         run: node agent.js
