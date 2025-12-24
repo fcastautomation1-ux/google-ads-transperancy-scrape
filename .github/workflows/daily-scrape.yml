@@ -1,0 +1,39 @@
+name: Daily Google Ads Scraping
+
+on:
+  schedule:
+    # Runs daily at 9:00 AM Pakistan Time (4:00 AM UTC)
+    # Pakistan Time is UTC+5
+    - cron: '0 4 * * *'
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Create credentials file
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > google-ads-transperancy-scrape/credentials.json
+        shell: bash
+      
+      - name: Run scraping script
+        working-directory: google-ads-transperancy-scrape
+        run: node agent.js
+      
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f google-ads-transperancy-scrape/credentials.json
+

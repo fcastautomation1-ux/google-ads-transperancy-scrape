@@ -1,0 +1,19 @@
+{
+  "name": "puppeteer-project",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node google-ads-transperancy-scrape/agent.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "googleapis": "^169.0.0",
+    "p-limit": "^7.2.0",
+    "puppeteer": "^24.34.0"
+  }
+}
