@@ -16,15 +16,27 @@ const GITHUB_REPO = 'google-ads-transperancy-scrape'; // Your repository name
 const GITHUB_TOKEN = 'YOUR_GITHUB_PAT_TOKEN'; // Start with ghp_...
 
 function triggerGitHubWorkflow() {
-  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/dispatches`;
-  
-  const payload = {
-    event_type: 'sheet_update',
-    client_payload: {
-      timestamp: new Date().toISOString()
-    }
+  // 1. Check if a workflow is ALREADY running
+  const statusUrl = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runs?status=in_progress`;
+  const getOptions = {
+    headers: { 'Authorization': 'token ' + GITHUB_TOKEN }
   };
+  
+  try {
+    const response = UrlFetchApp.fetch(statusUrl, getOptions);
+    const data = JSON.parse(response.getContentText());
+    
+    if (data.total_count > 0) {
+      Logger.log("⏳ A workflow is already running. No need to start a new one.");
+      return; 
+    }
+  } catch (e) {
+    Logger.log("⚠️ Could not check status, proceeding anyway...");
+  }
 
+  // 2. If nothing is running, trigger it
+  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/dispatches`;
+  const payload = { event_type: 'sheet_update' };
   const options = {
     method: 'post',
     headers: {
@@ -35,41 +47,34 @@ function triggerGitHubWorkflow() {
     payload: JSON.stringify(payload)
   };
 
-  try {
-    UrlFetchApp.fetch(url, options);
-    Logger.log('✅ Workflow triggered successfully');
-  } catch (error) {
-    Logger.log('❌ Error triggering workflow: ' + error.toString());
-  }
+  UrlFetchApp.fetch(url, options);
+  Logger.log('✅ Workflow triggered successfully');
 }
 
-// Check specifically for new URLs that don't have video IDs yet
+// Only trigger if new rows are added below the last processed row
 function checkForChanges(e) {
-  const sheet = e.source.getActiveSheet();
-  const range = e.range;
-  const startRow = range.getRow();
-  const numRows = range.getNumRows();
-
-  let hasNewWork = false;
-
-  // Check the rows that were just changed
-  for (let i = 0; i < numRows; i++) {
-    const currentRow = startRow + i;
-    const url = sheet.getRange(currentRow, 1).getValue().toString().trim(); // Column A
-    const videoId = sheet.getRange(currentRow, 6).getValue().toString().trim(); // Column F
-
-    // If A has a URL and F is empty, we found something new to work on!
-    if (url !== "" && videoId === "") {
-      hasNewWork = true;
-      break; // One row is enough to justify starting the scraper
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("Sheet1"); // Ensure this matches your sheet
+  const lastRow = sheet.getLastRow();
+  
+  // Find the last row in Column F that has any value (ID or NOT_FOUND)
+  const dataF = sheet.getRange(1, 6, lastRow).getValues();
+  let lastProcessedRow = 0;
+  
+  for (let i = dataF.length - 1; i >= 0; i--) {
+    if (dataF[i][0].toString().trim() !== "") {
+      lastProcessedRow = i + 1;
+      break;
     }
   }
 
-  if (hasNewWork) {
-    Logger.log("🚀 New unprocessed URL(s) detected. Starting GitHub scraper...");
+  // If the sheet's total rows are more than the last processed row,
+  // it means we have new URLs at the bottom!
+  if (lastRow > lastProcessedRow) {
+    Logger.log("🚀 New rows found at the bottom of the sheet. Starting GitHub...");
     triggerGitHubWorkflow();
   } else {
-    Logger.log("ℹ️ Change ignored: No new unprocessed URLs found in this edit.");
+    Logger.log("ℹ️ No new rows found below row " + lastProcessedRow);
   }
 }
 ```

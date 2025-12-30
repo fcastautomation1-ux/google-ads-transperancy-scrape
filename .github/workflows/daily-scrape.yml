@@ -17,6 +17,10 @@ on:
   repository_dispatch:
     types: [sheet_update]
 
+concurrency:
+  group: scraping-group
+  cancel-in-progress: true
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
