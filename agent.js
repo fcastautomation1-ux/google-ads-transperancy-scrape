@@ -32,26 +32,28 @@ async function getGoogleSheetsClient() {
 }
 
 async function getUrlsFromSheet(sheets) {
-  // Get both column A (URLs) and column F (existing video IDs)
+  // Get columns A to H
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!A:F`,
+    range: `${SHEET_NAME}!A:H`,
   });
 
   const rows = response.data.values || [];
   const urlData = [];
 
-  // Skip header row, process each row
+  // Skip header row
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
     const url = row[0]?.trim();
-    const existingVideoId = row[5]?.trim(); // Column F is index 5
+    const existingVideoId = row[5]?.trim(); // Column F
+    const existingAppLink = row[6]?.trim(); // Column G
+    const existingAppName = row[7]?.trim(); // Column H
 
-    // Only include URLs that are not empty and don't have existing video ID
-    if (url && !existingVideoId) {
+    // Process if it has a URL and is missing ANY of the target data
+    if (url && (!existingVideoId || !existingAppLink || !existingAppName)) {
       urlData.push({
         url: url,
-        rowIndex: i - 1 // 0-based index for row (excluding header)
+        rowIndex: i - 1
       });
     }
   }
@@ -62,9 +64,9 @@ async function getUrlsFromSheet(sheets) {
 async function batchWriteToSheet(sheets, updates) {
   if (updates.length === 0) return;
 
-  const data = updates.map(({ rowIndex, videoId }) => ({
-    range: `${SHEET_NAME}!F${rowIndex + 2}`,
-    values: [[videoId]]
+  const data = updates.map(({ rowIndex, videoId, appLink, appName }) => ({
+    range: `${SHEET_NAME}!F${rowIndex + 2}:H${rowIndex + 2}`,
+    values: [[videoId, appLink, appName]]
   }));
 
   try {
@@ -75,7 +77,7 @@ async function batchWriteToSheet(sheets, updates) {
         data: data
       }
     });
-    console.log(`  ✅ Batch wrote ${updates.length} results`);
+    console.log(`  ✅ Batch wrote ${updates.length} results (F, G, H)`);
   } catch (error) {
     console.error(`  ❌ Batch write error:`, error.message);
   }
@@ -84,7 +86,7 @@ async function batchWriteToSheet(sheets, updates) {
 // ============================================
 // BALANCED VIDEO ID EXTRACTOR WITH RETRY
 // ============================================
-async function extractVideoId(url, browser, attempt = 1, baseWaitTime = POST_CLICK_WAIT) {
+async function extractAdData(url, browser, attempt = 1, baseWaitTime = POST_CLICK_WAIT) {
   const page = await browser.newPage();
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   let videoSourceId = null;
@@ -95,7 +97,7 @@ async function extractVideoId(url, browser, attempt = 1, baseWaitTime = POST_CLI
     const resourceType = request.resourceType();
     const requestUrl = request.url();
 
-    // Check for video ID in ALL requests (before blocking anything)
+    // Check for video ID in ALL requests
     if (requestUrl.includes('googlevideo.com/videoplayback')) {
       const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
       const id = urlParams.get('id');
@@ -104,30 +106,56 @@ async function extractVideoId(url, browser, attempt = 1, baseWaitTime = POST_CLI
       }
     }
 
-    // Only block large images and fonts - allow everything else
     if (['image', 'font'].includes(resourceType)) {
       request.abort();
       return;
     }
-
     request.continue();
   });
 
   try {
-    // Use networkidle2 for better stability with slow-loading pages
-    await page.goto(url, {
-      waitUntil: 'networkidle2',
-      timeout: MAX_WAIT_TIME
-    });
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: MAX_WAIT_TIME });
 
-    // Initial wait - increase on retries
     const initialWait = 3000 * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
     await sleep(initialWait);
 
-    // Find and click play button
+    // Extract App Name and Play Store Link
+    const appInfo = await page.evaluate(() => {
+      const info = { appLink: null, appName: null };
+
+      // Look for Play Store link
+      const links = Array.from(document.querySelectorAll('a'));
+      const playLink = links.find(a => a.href.includes('play.google.com/store/apps/details'));
+      if (playLink) {
+        info.appLink = playLink.href;
+
+        // Try to find app name near the link or in specific ad elements
+        const parent = playLink.closest('div');
+        if (parent) {
+          // Look for text in headings or common app name classes
+          const h1 = document.querySelector('h1');
+          if (h1) info.appName = h1.textContent.trim();
+
+          // Alternative: look for advertiser name or app title
+          if (!info.appName) {
+            const title = document.querySelector('.creative-preview-title'); // Hypothetical common class
+            if (title) info.appName = title.textContent.trim();
+          }
+        }
+      }
+
+      // If we still don't have an app name, find the main advertiser title text
+      if (!info.appName) {
+        const metaTitle = document.title.split(' - ')[0]; // Often contains app name
+        info.appName = metaTitle.trim();
+      }
+
+      return info;
+    });
+
+    // Find and click play button (logic remains same)
     const playButtonInfo = await page.evaluate(() => {
       const results = { found: false, x: 0, y: 0 };
-
       const searchForPlayButton = (root) => {
         const playButton = root.querySelector('.play-button');
         if (playButton) {
@@ -139,7 +167,6 @@ async function extractVideoId(url, browser, attempt = 1, baseWaitTime = POST_CLI
             return true;
           }
         }
-
         const elements = root.querySelectorAll('*');
         for (const el of elements) {
           if (el.shadowRoot) {
@@ -160,10 +187,7 @@ async function extractVideoId(url, browser, attempt = 1, baseWaitTime = POST_CLI
           }
         } catch (e) { }
       }
-
-      if (!results.found) {
-        searchForPlayButton(document);
-      }
+      if (!results.found) searchForPlayButton(document);
 
       if (!results.found) {
         for (const iframe of iframes) {
@@ -176,45 +200,27 @@ async function extractVideoId(url, browser, attempt = 1, baseWaitTime = POST_CLI
           }
         }
       }
-
       return results;
     });
 
     if (playButtonInfo.found) {
-      // Simple but realistic click
       const client = await page.target().createCDPSession();
-
-      await client.send('Input.dispatchMouseEvent', {
-        type: 'mouseMoved',
-        x: playButtonInfo.x,
-        y: playButtonInfo.y
-      });
+      await client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: playButtonInfo.x, y: playButtonInfo.y });
       await sleep(100);
-
-      await client.send('Input.dispatchMouseEvent', {
-        type: 'mousePressed',
-        x: playButtonInfo.x,
-        y: playButtonInfo.y,
-        button: 'left',
-        clickCount: 1
-      });
+      await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: playButtonInfo.x, y: playButtonInfo.y, button: 'left', clickCount: 1 });
       await sleep(80);
+      await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: playButtonInfo.x, y: playButtonInfo.y, button: 'left', clickCount: 1 });
 
-      await client.send('Input.dispatchMouseEvent', {
-        type: 'mouseReleased',
-        x: playButtonInfo.x,
-        y: playButtonInfo.y,
-        button: 'left',
-        clickCount: 1
-      });
-
-      // Wait for video to start and make network request - increase wait time on retries
       const waitTime = baseWaitTime * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
       await sleep(waitTime);
     }
 
     await page.close();
-    return videoSourceId;
+    return {
+      videoId: videoSourceId,
+      appLink: appInfo.appLink || 'NOT_FOUND',
+      appName: appInfo.appName || 'NOT_FOUND'
+    };
   } catch (err) {
     console.error(`  ❌ Error (attempt ${attempt}): ${err.message}`);
     await page.close();
@@ -223,30 +229,29 @@ async function extractVideoId(url, browser, attempt = 1, baseWaitTime = POST_CLI
 }
 
 // Retry wrapper function
-async function extractVideoIdWithRetry(url, browser, rowIndex) {
+async function extractAdDataWithRetry(url, browser, rowIndex) {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 1) {
       console.log(`  🔄 [${rowIndex + 1}] Retry attempt ${attempt}/${MAX_RETRIES}...`);
     }
 
-    const videoId = await extractVideoId(url, browser, attempt, POST_CLICK_WAIT);
+    const adData = await extractAdData(url, browser, attempt, POST_CLICK_WAIT);
 
-    if (videoId) {
+    if (adData && adData.videoId) {
       if (attempt > 1) {
-        console.log(`  ✅ [${rowIndex + 1}] Video ID found on attempt ${attempt}: ${videoId}`);
+        console.log(`  ✅ [${rowIndex + 1}] Data found on attempt ${attempt}`);
       }
-      return videoId;
+      return adData;
     }
 
     if (attempt < MAX_RETRIES) {
-      // Wait before retrying (exponential backoff)
       const retryDelay = 2000 * Math.pow(2, attempt - 1);
       console.log(`  ⏳ [${rowIndex + 1}] Waiting ${retryDelay}ms before retry...`);
       await new Promise(r => setTimeout(r, retryDelay));
     }
   }
 
-  return null;
+  return { videoId: 'NOT_FOUND', appLink: 'NOT_FOUND', appName: 'NOT_FOUND' };
 }
 
 // ============================================
@@ -261,15 +266,10 @@ async function processUrlBatch(urlData, startIndex, browser) {
 
       console.log(`[${rowIndex + 1}] Processing: ${url.substring(0, 60)}...`);
 
-      const videoId = await extractVideoIdWithRetry(url, browser, rowIndex);
+      const adData = await extractAdDataWithRetry(url, browser, rowIndex);
 
-      if (videoId) {
-        console.log(`  ✅ [${rowIndex + 1}] Video ID: ${videoId}`);
-        return { rowIndex: rowIndex, videoId };
-      } else {
-        console.log(`  ⚠️  [${rowIndex + 1}] No video ID found after ${MAX_RETRIES} attempts`);
-        return { rowIndex: rowIndex, videoId: 'NOT_FOUND' };
-      }
+      console.log(`  📊 [${rowIndex + 1}] Video: ${adData.videoId.substring(0, 8)} | App: ${adData.appName.substring(0, 15)}`);
+      return { rowIndex: rowIndex, ...adData };
     })
   );
 
