@@ -51,13 +51,34 @@ function triggerGitHubWorkflow() {
   Logger.log('✅ Workflow triggered successfully');
 }
 
-// Only trigger if new rows are added below the last processed row
+// 1. Instantly removes duplicate URLs from Column A (Bulk Operation)
+function removeDuplicates(sheet) {
+  const oldLastRow = sheet.getLastRow();
+  if (oldLastRow < 2) return;
+
+  // Use built-in Google Sheets command to remove duplicates based on Column 1 (Col A)
+  // This happens "all at once" and is much faster than manual looping
+  const lastColumn = sheet.getLastColumn();
+  const range = sheet.getRange(1, 1, oldLastRow, lastColumn);
+  range.removeDuplicates([1]);
+  
+  const newLastRow = sheet.getLastRow();
+  const count = oldLastRow - newLastRow;
+
+  if (count > 0) {
+    Logger.log("🗑️ Bulk removed " + count + " duplicate URLs.");
+    SpreadsheetApp.getActiveSpreadsheet().toast(`🗑️ Removed ${count} duplicate rows at once.`, "Duplicate Cleaner", 5);
+  }
+}
+
+// 2. Only trigger if new rows are added below the last processed row
 function checkForChanges(e) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName("Sheet1"); // Ensure this matches your sheet
-  const lastRow = sheet.getLastRow();
+  const sheet = ss.getSheetByName("Sheet1"); 
   
-  // Find the last row in Column F that has any value (ID or NOT_FOUND)
+  removeDuplicates(sheet);
+  
+  const lastRow = sheet.getLastRow();
   const dataF = sheet.getRange(1, 6, lastRow).getValues();
   let lastProcessedRow = 0;
   
@@ -68,29 +89,50 @@ function checkForChanges(e) {
     }
   }
 
-  // If the sheet's total rows are more than the last processed row,
-  // it means we have new URLs at the bottom!
   if (lastRow > lastProcessedRow) {
-    Logger.log("🚀 New rows found at the bottom of the sheet. Starting GitHub...");
+    Logger.log("🚀 New rows found. Starting GitHub...");
     triggerGitHubWorkflow();
-  } else {
-    Logger.log("ℹ️ No new rows found below row " + lastProcessedRow);
+  }
+}
+
+// 3. GUARDIAN: Checks every 10-15 mins to see if the workflow stopped but links remain
+function guardianCheck() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("Sheet1");
+  const lastRow = sheet.getLastRow();
+  
+  // Scans for ANY empty F cells where A has a URL
+  if (lastRow < 2) return;
+  const dataA = sheet.getRange(2, 1, lastRow - 1).getValues();
+  const dataF = sheet.getRange(2, 6, lastRow - 1).getValues();
+
+  let pendingWork = false;
+  for (let i = 0; i < dataA.length; i++) {
+    if (dataA[i][0].toString().trim() !== "" && dataF[i][0].toString().trim() === "") {
+      pendingWork = true;
+      break;
+    }
+  }
+
+  if (pendingWork) {
+    Logger.log("🛡️ Guardian: Detected pending work. Ensuring workflow is running...");
+    triggerGitHubWorkflow();
   }
 }
 ```
 
-## 3. Set up the Trigger
-Since the script needs to connect to GitHub, it cannot run automatically without setup.
+## 3. Set up the Triggers
+You need **TWO** triggers for 24/7 reliability:
 
-1. In the Apps Script sidebar, click on the **Triggers** icon (alarm clock).
-2. Click **+ Add Trigger** (bottom right).
-3. configure it as follows:
-   - **Choose which function to run**: `checkForChanges`
-   - **Select event source**: `From spreadsheet`
-   - **Select event type**: `On change` (This covers rows added, copy-paste, etc.)
-4. Click **Save**.
-5. You will see a "Sign in with Google" popup.
-6. Click **Advanced** > **Go to (Script Name) (unsafe)** > **Allow**.
+1.  **Change Trigger:**
+    - Function: `checkForChanges`
+    - Source: `From spreadsheet`
+    - Event: `On change`
+2.  **Guardian Timer (The "Restart" Logic):**
+    - Function: `guardianCheck`
+    - Source: `Time-driven`
+    - Type: `Minutes timer`
+    - Interval: `Every 10 minutes` (This ensures it starts back up if stopped manually)
 
 ## 4. Get a GitHub Token
 1. Go to GitHub > Settings > Developer settings > Personal access tokens > Tokens (classic).

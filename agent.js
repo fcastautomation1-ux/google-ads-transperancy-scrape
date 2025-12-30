@@ -62,9 +62,9 @@ async function getUrlsFromSheet(sheets) {
 async function batchWriteToSheet(sheets, updates) {
   if (updates.length === 0) return;
 
-  const data = updates.map(({ rowIndex, videoId, appLink, appName }) => ({
-    range: `${SHEET_NAME}!F${rowIndex + 2}:H${rowIndex + 2}`,
-    values: [[videoId, appLink, appName]]
+  const data = updates.map(({ rowIndex, videoId }) => ({
+    range: `${SHEET_NAME}!F${rowIndex + 2}`,
+    values: [[videoId]]
   }));
 
   try {
@@ -75,16 +75,16 @@ async function batchWriteToSheet(sheets, updates) {
         data: data
       }
     });
-    console.log(`  ✅ Batch wrote ${updates.length} results (F, G, H)`);
+    console.log(`  ✅ Batch wrote ${updates.length} results to Column F`);
   } catch (error) {
     console.error(`  ❌ Batch write error:`, error.message);
   }
 }
 
 // ============================================
-// BALANCED VIDEO ID EXTRACTOR WITH RETRY
+// VIDEO ID EXTRACTOR WITH RETRY
 // ============================================
-async function extractAdData(url, browser, attempt = 1, baseWaitTime = POST_CLICK_WAIT) {
+async function extractVideoId(url, browser, attempt = 1, baseWaitTime = POST_CLICK_WAIT) {
   const page = await browser.newPage();
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   let videoSourceId = null;
@@ -117,41 +117,7 @@ async function extractAdData(url, browser, attempt = 1, baseWaitTime = POST_CLIC
     const initialWait = 3000 * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
     await sleep(initialWait);
 
-    // Extract App Name and Play Store Link
-    const appInfo = await page.evaluate(() => {
-      const info = { appLink: null, appName: null };
-
-      // Look for Play Store link
-      const links = Array.from(document.querySelectorAll('a'));
-      const playLink = links.find(a => a.href.includes('play.google.com/store/apps/details'));
-      if (playLink) {
-        info.appLink = playLink.href;
-
-        // Try to find app name near the link or in specific ad elements
-        const parent = playLink.closest('div');
-        if (parent) {
-          // Look for text in headings or common app name classes
-          const h1 = document.querySelector('h1');
-          if (h1) info.appName = h1.textContent.trim();
-
-          // Alternative: look for advertiser name or app title
-          if (!info.appName) {
-            const title = document.querySelector('.creative-preview-title'); // Hypothetical common class
-            if (title) info.appName = title.textContent.trim();
-          }
-        }
-      }
-
-      // If we still don't have an app name, find the main advertiser title text
-      if (!info.appName) {
-        const metaTitle = document.title.split(' - ')[0]; // Often contains app name
-        info.appName = metaTitle.trim();
-      }
-
-      return info;
-    });
-
-    // Find and click play button (logic remains same)
+    // Find and click play button
     const playButtonInfo = await page.evaluate(() => {
       const results = { found: false, x: 0, y: 0 };
       const searchForPlayButton = (root) => {
@@ -214,11 +180,7 @@ async function extractAdData(url, browser, attempt = 1, baseWaitTime = POST_CLIC
     }
 
     await page.close();
-    return {
-      videoId: videoSourceId,
-      appLink: appInfo.appLink || 'NOT_FOUND',
-      appName: appInfo.appName || 'NOT_FOUND'
-    };
+    return videoSourceId;
   } catch (err) {
     console.error(`  ❌ Error (attempt ${attempt}): ${err.message}`);
     await page.close();
@@ -227,19 +189,19 @@ async function extractAdData(url, browser, attempt = 1, baseWaitTime = POST_CLIC
 }
 
 // Retry wrapper function
-async function extractAdDataWithRetry(url, browser, rowIndex) {
+async function extractVideoIdWithRetry(url, browser, rowIndex) {
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 1) {
       console.log(`  🔄 [${rowIndex + 1}] Retry attempt ${attempt}/${MAX_RETRIES}...`);
     }
 
-    const adData = await extractAdData(url, browser, attempt, POST_CLICK_WAIT);
+    const videoId = await extractVideoId(url, browser, attempt, POST_CLICK_WAIT);
 
-    if (adData && adData.videoId) {
+    if (videoId) {
       if (attempt > 1) {
-        console.log(`  ✅ [${rowIndex + 1}] Data found on attempt ${attempt}`);
+        console.log(`  ✅ [${rowIndex + 1}] Video ID found on attempt ${attempt}: ${videoId}`);
       }
-      return adData;
+      return videoId;
     }
 
     if (attempt < MAX_RETRIES) {
@@ -249,7 +211,7 @@ async function extractAdDataWithRetry(url, browser, rowIndex) {
     }
   }
 
-  return { videoId: 'NOT_FOUND', appLink: 'NOT_FOUND', appName: 'NOT_FOUND' };
+  return 'NOT_FOUND';
 }
 
 // ============================================
@@ -264,10 +226,10 @@ async function processUrlBatch(urlData, startIndex, browser) {
 
       console.log(`[${rowIndex + 1}] Processing: ${url.substring(0, 60)}...`);
 
-      const adData = await extractAdDataWithRetry(url, browser, rowIndex);
+      const videoId = await extractVideoIdWithRetry(url, browser, rowIndex);
 
-      console.log(`  📊 [${rowIndex + 1}] Video: ${adData.videoId.substring(0, 8)} | App: ${adData.appName.substring(0, 15)}`);
-      return { rowIndex: rowIndex, ...adData };
+      console.log(`  📊 [${rowIndex + 1}] Video ID: ${videoId}`);
+      return { rowIndex: rowIndex, videoId };
     })
   );
 
