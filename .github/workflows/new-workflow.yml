@@ -1,0 +1,49 @@
+name: New Agent Workflow
+
+on:
+  schedule:
+    # Example: Runs twice a day at 10 AM and 10 PM PKT
+    # Pakistan Time is UTC+5
+    - cron: '0 5 * * *'
+    - cron: '0 17 * * *'
+  workflow_dispatch: # Allows manual triggering
+  repository_dispatch:
+    types: [new_agent_trigger]
+
+concurrency:
+  group: new-agent-group
+  cancel-in-progress: true
+
+jobs:
+  run-new-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Create credentials file
+        run: |
+          cat > credentials.json << EOF
+          ${{ secrets.GOOGLE_CREDENTIALS }}
+          EOF
+        shell: bash
+      
+      - name: Run new agent script
+        run: node new_agent.js
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f credentials.json
