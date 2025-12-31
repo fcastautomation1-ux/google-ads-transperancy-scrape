@@ -56,15 +56,34 @@ async function getUrlData(sheets) {
 async function safeBatchWrite(sheets, updates) {
     if (updates.length === 0) return;
 
+    // 1. Re-fetch current Column A (URLs) and Column B (App Link) to find where these URLs are NOW
     const response = await sheets.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A:A`,
+        range: `${SHEET_NAME}!A:C`,
     });
-    const currentUrls = (response.data.values || []).map(r => r[0]?.trim());
+    const rows = response.data.values || [];
 
     const data = [];
     updates.forEach(({ url, appName, storeLink }) => {
-        const foundIndex = currentUrls.lastIndexOf(url); // search from bottom
+        // 2. Find the index where URL matches AND Column B (index 1) is empty
+        let foundIndex = -1;
+        for (let i = 1; i < rows.length; i++) {
+            if (rows[i][0]?.trim() === url && !rows[i][1]?.trim()) {
+                foundIndex = i;
+                break;
+            }
+        }
+
+        // Fallback: If no empty row found, find the last match
+        if (foundIndex === -1) {
+            for (let i = rows.length - 1; i >= 1; i--) {
+                if (rows[i][0]?.trim() === url) {
+                    foundIndex = i;
+                    break;
+                }
+            }
+        }
+
         if (foundIndex !== -1) {
             const rowNum = foundIndex + 1;
             data.push({
@@ -182,12 +201,21 @@ async function extractAppData(url, browser, attempt = 1) {
                     // Fallback Link: Any link that looks like a destination (not google internal)
                     if (!data.storeLink) {
                         const allLinks = Array.from(root.querySelectorAll('a[href]'));
-                        const destLink = allLinks.find(a =>
-                            !a.href.includes('google.com/ads') &&
-                            !a.href.includes('google.com/transparency') &&
-                            a.href.startsWith('http')
-                        );
-                        if (destLink) data.storeLink = destLink.href;
+                        const destLink = allLinks.find(a => {
+                            const h = a.href.toLowerCase();
+                            return !h.includes('google.com') &&
+                                !h.includes('youtube.com') &&
+                                !h.includes('javascript:') &&
+                                h.startsWith('http');
+                        });
+
+                        // If no non-google link, try specific aclk link as last resort
+                        if (!destLink) {
+                            const aclk = allLinks.find(a => a.href.includes('googleadservices.com/pagead/aclk'));
+                            if (aclk) data.storeLink = aclk.href;
+                        } else {
+                            data.storeLink = destLink.href;
+                        }
                     }
 
                     // App Name / Brand Name Selectors (Expanded for Text Ads)
