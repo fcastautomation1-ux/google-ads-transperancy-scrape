@@ -8,7 +8,7 @@ const fs = require('fs');
 const SPREADSHEET_ID = '1beJ263B3m4L8pgD9RWsls-orKLUvLMfT2kExaiyNl7g';
 const SHEET_NAME = 'Sheet1';
 const CREDENTIALS_PATH = './credentials.json';
-const CONCURRENT_PAGES = 6;
+const CONCURRENT_PAGES = 3;
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 3;
 const RETRY_WAIT_MULTIPLIER = 1.5;
@@ -269,8 +269,9 @@ async function extractAppData(url, browser, attempt = 1) {
 async function extractWithRetry(url, browser) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         const data = await extractAppData(url, browser, attempt);
+        if (data.appName === 'BLOCKED') return data; // Return immediately to trigger restart
         if (data.appName !== 'NOT_FOUND' || data.storeLink !== 'NOT_FOUND') return data;
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 3000 + Math.random() * 2000));
     }
     return { appName: 'NOT_FOUND', storeLink: 'NOT_FOUND' };
 }
@@ -316,12 +317,22 @@ async function extractWithRetry(url, browser) {
 
         const results = await Promise.all(batch.map(async (item) => {
             const data = await extractWithRetry(item.url, browser);
-            console.log(`  ✅ [${data.appName}] Found info for URL...`);
             return { url: item.url, ...data };
         }));
 
+        // CHECK IF ANY IN BATCH WERE BLOCKED
+        if (results.some(r => r.appName === 'BLOCKED')) {
+            console.log('🛑 Block detected by one of the pages. Restarting to get a fresh IP...');
+            await browser.close();
+            await triggerSelfRestart();
+            process.exit(0);
+        }
+
         // Writing results safely to handle any row shifts
         await safeBatchWrite(sheets, results);
+
+        // Final batch delay to breathe
+        await new Promise(r => setTimeout(r, 2000));
     }
 
     await browser.close();
