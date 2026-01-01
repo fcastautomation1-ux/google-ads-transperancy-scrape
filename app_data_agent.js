@@ -109,7 +109,7 @@ async function safeBatchWrite(sheets, updates) {
     const rows = response.data.values || [];
 
     const data = [];
-    updates.forEach(({ url, appName, storeLink }) => {
+    updates.forEach(({ url, appName, storeLink, isVideo }) => {
         // 2. Find the index where URL matches AND Column B (index 1) is empty
         let foundIndex = -1;
         for (let i = 1; i < rows.length; i++) {
@@ -138,6 +138,10 @@ async function safeBatchWrite(sheets, updates) {
             data.push({
                 range: `${SHEET_NAME}!C${rowNum}`, // Column C for Name
                 values: [[appName]]
+            });
+            data.push({
+                range: `${SHEET_NAME}!D${rowNum}`, // Column D for Format
+                values: [[isVideo ? 'Video Ad' : 'Text/Image Ad']]
             });
         }
     });
@@ -199,7 +203,7 @@ async function extractAppData(url, browser, attempt = 1) {
         }
         return cleaned;
     };
-    let result = { appName: 'NOT_FOUND', storeLink: 'NOT_FOUND' };
+    let result = { appName: 'NOT_FOUND', storeLink: 'NOT_FOUND', isVideo: false };
 
     // ANTI-DETECTION: Random User-Agent per request
     const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
@@ -229,10 +233,18 @@ async function extractAppData(url, browser, attempt = 1) {
         const response = await page.goto(url, { waitUntil: 'networkidle0', timeout: MAX_WAIT_TIME });
 
         // 1. Capture the "Advertiser Name" from the main page to use as a blacklist
-        const blacklistName = await page.evaluate(() => {
+        // Also check if it's a video ad (checking for actual video element ONLY)
+        const mainPageInfo = await page.evaluate(() => {
             const topTitle = document.querySelector('h1, .advertiser-name, .ad-details-heading');
-            return topTitle ? topTitle.innerText.trim().toLowerCase() : '';
+            // User requested NOT to check 'Format: Video' text, only actual video elements
+            const isVideo = !!document.querySelector('video');
+            return {
+                blacklist: topTitle ? topTitle.innerText.trim().toLowerCase() : '',
+                isVideo
+            };
         });
+        const blacklistName = mainPageInfo.blacklist;
+        if (mainPageInfo.isVideo) result.isVideo = true;
 
         const content = await page.content();
         // Extra block detection: HTTP 429 or common captcha indicators
@@ -273,8 +285,10 @@ async function extractAppData(url, browser, attempt = 1) {
         for (const frame of frames) {
             try {
                 const frameData = await frame.evaluate((blacklist) => {
-                    const data = { appName: null, storeLink: null };
+                    const data = { appName: null, storeLink: null, isVideo: false };
                     const root = document.querySelector('#portrait-landscape-phone') || document.body;
+
+                    if (document.querySelector('video')) data.isVideo = true;
 
                     // Helper to clean/extract real link from an href
                     const cleanLink = (href) => {
@@ -388,6 +402,7 @@ async function extractAppData(url, browser, attempt = 1) {
 
                 if (frameData.storeLink && result.storeLink === 'NOT_FOUND') result.storeLink = frameData.storeLink;
                 if (frameData.appName && result.appName === 'NOT_FOUND') result.appName = cleanName(frameData.appName);
+                if (frameData.isVideo) result.isVideo = true;
                 if (result.storeLink !== 'NOT_FOUND' && result.appName !== 'NOT_FOUND') break;
             } catch (e) { }
         }
