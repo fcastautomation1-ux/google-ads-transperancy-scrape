@@ -373,9 +373,35 @@ async function extractAppData(url, browser, attempt = 1) {
                         const txt = cleanText(rawTxt); // Clean CSS garbage
                         // Check if name is valid (not blacklisted)
                         if (txt && txt.length > 2 && txt.toLowerCase() !== blacklist) {
-                            const extractedLink = cleanLink(combinedEl.href);
+                            // Try to get link from the ochAppName first
+                            let extractedLink = cleanLink(combinedEl.href);
 
-                            // If we have BOTH Name and Link in this element -> IT IS A VIDEO AD
+                            // If ochAppName doesn't have a valid store link, try ochInstallButton
+                            if (!extractedLink) {
+                                const installBtn = root.querySelector('a[data-asoch-targets*="ochInstallButton"]');
+                                if (installBtn) {
+                                    extractedLink = cleanLink(installBtn.href);
+                                }
+                            }
+
+                            // If still no link, try other common install button selectors
+                            if (!extractedLink) {
+                                const altSelectors = [
+                                    'a[data-asoch-targets*="ctaButton"]',
+                                    '.install-button-anchor',
+                                    'a[href*="play.google.com"]',
+                                    'a[href*="itunes.apple.com"]'
+                                ];
+                                for (const sel of altSelectors) {
+                                    const el = root.querySelector(sel);
+                                    if (el) {
+                                        extractedLink = cleanLink(el.href);
+                                        if (extractedLink) break;
+                                    }
+                                }
+                            }
+
+                            // If we have BOTH Name and Link -> IT IS A VIDEO AD
                             if (extractedLink) {
                                 data.appName = txt;
                                 data.storeLink = extractedLink;
@@ -434,36 +460,14 @@ async function extractAppData(url, browser, attempt = 1) {
             } catch (e) { }
         }
 
-        // RegEx fallback for the link from full page source (STRICT MODE)
-        // We only accept the fallback link if it explicitly contains play.google.com or itunes.apple.com
-        // RegEx fallback for the link from full page source (STRICT MODE)
-        // We only accept the fallback link if it explicitly contains play.google.com or itunes.apple.com
-        // CRITICAL UPDATE: If we classified it as a Text Ad (isVideo=false) and found an App Name, 
-        // we should NOT search for a link here, to respect the "Text Ads = No Link" rule.
-
-        const isTextAd = (result.appName !== 'NOT_FOUND' && result.isVideo === false);
-
-        if (result.storeLink === 'NOT_FOUND' && !isTextAd) {
-            const pageSource = await page.content();
-            // Look for ad click links
-            const matches = pageSource.match(/https:\/\/www\.googleadservices\.com\/pagead\/aclk[^"'’\s]*/g);
-            if (matches) {
-                for (const match of matches) {
-                    try {
-                        const decoded = decodeURIComponent(match);
-                        if (decoded.includes('play.google.com') || decoded.includes('itunes.apple.com')) {
-                            result.storeLink = match; // Keep original link if it resolves to store
-                            break;
-                        }
-                    } catch (e) { }
-                }
-            }
-        }
-
+        // RegEx fallback DISABLED - was picking up wrong links from page source
+        // Links should only come from the actual ad iframe elements (ochAppName, ochInstallButton, etc.)
+        // If no link was found in the iframe, it means it's a Text Ad with no link.
 
         // If we still don't have appName, try meta tags/title as fallback
         if (result.appName === 'NOT_FOUND') {
             try {
+                const pageSource = await page.content();
                 const metaOg = pageSource.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i);
                 if (metaOg && metaOg[1]) result.appName = metaOg[1].trim();
                 if (result.appName === 'NOT_FOUND') {
