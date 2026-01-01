@@ -310,20 +310,60 @@ async function extractAppData(url, browser, attempt = 1) {
                     const data = { appName: null, storeLink: null, isVideo: false };
                     const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
-                    // Iframe Video Check
+                    // Iframe Video Check (Revised Logic: Default to Video, detect Text by size)
                     const checkFrameVideo = () => {
+                        // 1. Explicit Indicators (Strongest Signal)
                         const videoEl = root.querySelector('video');
                         if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return true;
-                        // Check for play buttons in iframe
+
                         const playBtns = root.querySelectorAll('[aria-label*="Play" i], .material-icons, .goog-icon, button');
                         for (const btn of playBtns) {
                             if (btn.innerText.includes('play_arrow') || btn.innerText.includes('play_circle')) return true;
                             const label = btn.getAttribute('aria-label') || '';
                             if (label.toLowerCase().includes('play')) return true;
                         }
-                        return false;
+
+                        // 2. Dimension Heuristic for Text Ads
+                        // User Logic: "Text ads only this dimensions... consider other ads as video ads"
+                        // We calculate the bounding box of the ad content (Title + Link).
+                        // If it's small (e.g. < 400x300), it's a Text Ad. Otherwise, assume Video.
+
+                        // Find key elements to measure content size
+                        const titleEl = root.querySelector('a[data-asoch-targets*="ochAppName"], [role="heading"], .app-title');
+                        const linkEl = root.querySelector('a[data-asoch-targets*="ochInstallButton"], .install-button-anchor');
+
+                        if (titleEl || linkEl) {
+                            // Get bounds of visible content
+                            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                            const elements = [titleEl, linkEl].filter(Boolean);
+
+                            elements.forEach(el => {
+                                const rect = el.getBoundingClientRect();
+                                if (rect.width > 0 && rect.height > 0) {
+                                    minX = Math.min(minX, rect.left);
+                                    minY = Math.min(minY, rect.top);
+                                    maxX = Math.max(maxX, rect.right);
+                                    maxY = Math.max(maxY, rect.bottom);
+                                }
+                            });
+
+                            if (minX !== Infinity) {
+                                const width = maxX - minX;
+                                const height = maxY - minY;
+
+                                // Heuristic: Text ads are visually compact (Title + Button usually clustered)
+                                // If the content area is small, strictly mark as TEXT AD (not video)
+                                // Threshold: 400px width, 300px height covers typical MREC/Banner text layouts
+                                if (width < 400 && height < 300) {
+                                    return false; // Force NOT Video
+                                }
+                            }
+                        }
+
+                        // Default for everything else (Large ads, Full screen, Unknowns) -> VIDEO AD
+                        return true;
                     }
-                    if (checkFrameVideo()) data.isVideo = true;
+                    data.isVideo = checkFrameVideo();
 
                     // Helper to clean/extract real link from an href
                     const cleanLink = (href) => {
