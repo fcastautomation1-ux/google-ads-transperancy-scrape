@@ -435,7 +435,14 @@ async function extractAppData(url, browser, attempt = 1) {
 
         // RegEx fallback for the link from full page source (STRICT MODE)
         // We only accept the fallback link if it explicitly contains play.google.com or itunes.apple.com
-        if (result.storeLink === 'NOT_FOUND') {
+        // RegEx fallback for the link from full page source (STRICT MODE)
+        // We only accept the fallback link if it explicitly contains play.google.com or itunes.apple.com
+        // CRITICAL UPDATE: If we classified it as a Text Ad (isVideo=false) and found an App Name, 
+        // we should NOT search for a link here, to respect the "Text Ads = No Link" rule.
+
+        const isTextAd = (result.appName !== 'NOT_FOUND' && result.isVideo === false);
+
+        if (result.storeLink === 'NOT_FOUND' && !isTextAd) {
             const pageSource = await page.content();
             // Look for ad click links
             const matches = pageSource.match(/https:\/\/www\.googleadservices\.com\/pagead\/aclk[^"'’\s]*/g);
