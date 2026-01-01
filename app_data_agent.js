@@ -373,40 +373,23 @@ async function extractAppData(url, browser, attempt = 1) {
                         const txt = cleanText(rawTxt); // Clean CSS garbage
                         // Check if name is valid (not blacklisted)
                         if (txt && txt.length > 2 && txt.toLowerCase() !== blacklist) {
-                            // Try to get link from the ochAppName first
-                            let extractedLink = cleanLink(combinedEl.href);
+                            // ONLY use the link from ochAppName itself - this is what differentiates Video from Text ads
+                            // Video Ads: ochAppName anchor HREF contains the store link
+                            // Text Ads: ochAppName anchor HREF does NOT have a store link (or no href at all)
+                            const extractedLink = cleanLink(combinedEl.href);
 
-                            // If ochAppName doesn't have a valid store link, try ochInstallButton
-                            if (!extractedLink) {
-                                const installBtn = root.querySelector('a[data-asoch-targets*="ochInstallButton"]');
-                                if (installBtn) {
-                                    extractedLink = cleanLink(installBtn.href);
-                                }
-                            }
-
-                            // If still no link, try other common install button selectors
-                            if (!extractedLink) {
-                                const altSelectors = [
-                                    'a[data-asoch-targets*="ctaButton"]',
-                                    '.install-button-anchor',
-                                    'a[href*="play.google.com"]',
-                                    'a[href*="itunes.apple.com"]'
-                                ];
-                                for (const sel of altSelectors) {
-                                    const el = root.querySelector(sel);
-                                    if (el) {
-                                        extractedLink = cleanLink(el.href);
-                                        if (extractedLink) break;
-                                    }
-                                }
-                            }
-
-                            // If we have BOTH Name and Link -> IT IS A VIDEO AD
+                            // If ochAppName has BOTH Name and Link -> IT IS A VIDEO AD
                             if (extractedLink) {
                                 data.appName = txt;
                                 data.storeLink = extractedLink;
                                 data.isVideo = true; // Confirmed VIDEO AD structure
                                 return data; // Return immediately
+                            } else {
+                                // ochAppName has name but NO link -> This is a TEXT AD
+                                data.appName = txt;
+                                data.storeLink = null; // Explicitly no link
+                                data.isVideo = false;
+                                return data;
                             }
                         }
                     }
