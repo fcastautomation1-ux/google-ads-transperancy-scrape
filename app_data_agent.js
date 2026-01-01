@@ -310,76 +310,6 @@ async function extractAppData(url, browser, attempt = 1) {
                     const data = { appName: null, storeLink: null, isVideo: false };
                     const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
-                    // Iframe Video Check (Revised as per User: Small = Text, Large = Video)
-                    const checkFrameVideo = () => {
-                        // 1. Explicit Indicators (Strongest signals for Video)
-                        const videoEl = root.querySelector('video');
-                        if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return true;
-
-                        const playBtns = root.querySelectorAll('[aria-label*="Play" i], .material-icons, .goog-icon, button');
-                        for (const btn of playBtns) {
-                            if (btn.innerText.includes('play_arrow') || btn.innerText.includes('play_circle')) return true;
-                            const label = btn.getAttribute('aria-label') || '';
-                            if (label.toLowerCase().includes('play')) return true;
-                        }
-
-                        // 2. Dimension Heuristic
-                        // "if ads look to small it mean it is text if large and video ads"
-
-                        // Collect all relevant content elements to determine the "Visual Size" of the ad
-                        const contentSelectors = [
-                            'a[data-asoch-targets*="ochAppName"]',
-                            '[role="heading"]',
-                            '.app-title',
-                            'a[data-asoch-targets*="ochInstallButton"]',
-                            '.install-button-anchor',
-                            'img', // Include images (icons/screenshots) in the size calc
-                            '.img_ad' // Common class for image ads
-                        ];
-
-                        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-                        let hasContent = false;
-
-                        contentSelectors.forEach(sel => {
-                            root.querySelectorAll(sel).forEach(el => {
-                                const rect = el.getBoundingClientRect();
-                                // Ignore hidden or zero-size elements
-                                if (rect.width > 5 && rect.height > 5) {
-                                    hasContent = true;
-                                    minX = Math.min(minX, rect.left);
-                                    minY = Math.min(minY, rect.top);
-                                    maxX = Math.max(maxX, rect.right);
-                                    maxY = Math.max(maxY, rect.bottom);
-                                }
-                            });
-                        });
-
-                        if (hasContent && minX !== Infinity) {
-                            const contentWidth = maxX - minX;
-                            const contentHeight = maxY - minY;
-
-                            console.log(`    Detected content size: ${Math.round(contentWidth)}x${Math.round(contentHeight)}`);
-
-                            // CRITERIA:
-                            // Small Card = Text/Image Ad
-                            // Typical Text Ad Card: ~350x150, or 300x250
-                            // Threshold: We'll set a generous cut-off. 
-                            // If it is wider than 480px OR taller than 360px, likely a large format/video.
-                            // If it is smaller than BOTH, it is a Text Ad.
-                            const SMALL_WIDTH_THRESHOLD = 480;
-                            const SMALL_HEIGHT_THRESHOLD = 360;
-
-                            if (contentWidth < SMALL_WIDTH_THRESHOLD && contentHeight < SMALL_HEIGHT_THRESHOLD) {
-                                return false; // Fits in small box -> Text/Image Ad
-                            }
-                        }
-
-                        // Default for everything else (Large ads, Full screen, Unknowns) -> VIDEO AD
-                        // If we couldn't measure content, or content is large, assume Video format.
-                        return true;
-                    }
-                    data.isVideo = checkFrameVideo();
-
                     // Helper to clean/extract real link from an href
                     const cleanLink = (href) => {
                         if (!href || href.includes('javascript:')) return null;
@@ -405,8 +335,13 @@ async function extractAppData(url, browser, attempt = 1) {
                         return null; // Return null if it's not a verified store link
                     };
 
-                    // STRATEGY 1: Combined Extraction (Best Logic based on User Feedback)
-                    // The App Name and Link are often in the SAME 'a' tag with 'ochAppName'
+                    // CLASSIFICATION STRATEGY (Based on User Structure Observation)
+                    // Video Ads: Name and Link are in the SAME anchor tag (ochAppName).
+                    // Text Ads: Name is just text (no link), Link is separate or missing/in a different button.
+
+                    data.isVideo = false; // Default to Text
+
+                    // 1. Try to find the "Video Ad" structure (Combined Name + Link)
                     const combinedSelector = 'a[data-asoch-targets*="ochAppName"]';
                     const combinedEl = root.querySelector(combinedSelector);
 
@@ -414,76 +349,73 @@ async function extractAppData(url, browser, attempt = 1) {
                         const txt = combinedEl.innerText.trim();
                         // Check if name is valid (not blacklisted)
                         if (txt && txt.length > 2 && txt.toLowerCase() !== blacklist) {
-                            data.appName = txt;
-                            // Attempt to get link from THIS VERY SAME element
                             const extractedLink = cleanLink(combinedEl.href);
+
+                            // If we have BOTH Name and Link in this element -> IT IS A VIDEO AD
                             if (extractedLink) {
+                                data.appName = txt;
                                 data.storeLink = extractedLink;
+                                data.isVideo = true; // Confirmed VIDEO AD structure
+                                return data; // Return immediately
                             }
                         }
                     }
 
-                    // If we found both, we are GOLDEN. Return immediately.
-                    if (data.appName && data.storeLink) return data;
+                    // 2. Fallback: Separate Extraction (Likely a Text/Image Ad)
+                    // If we are here, it means we didn't find the "Video Ad" structure (Combined).
+                    // We will search for Name and Link separately.
 
-
-                    // STRATEGY 2: Fallback - Separate Search
-                    // If Strategy 1 failed (or only found one part), try to fill gaps.
-
-                    // A. Find Link if missing
-                    if (!data.storeLink) {
-                        const xpath = '//*[@id="portrait-landscape-phone"]/div[1]/div[5]/a[2]';
-                        const xpRes = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-                        if (xpRes && xpRes.href) {
-                            const cleanXpLink = cleanLink(xpRes.href);
-                            if (cleanXpLink) data.storeLink = cleanXpLink;
-                        }
-
-                        if (!data.storeLink) {
-                            const linkSelectors = [
-                                'a[data-asoch-targets*="ochInstallButton"]', // High probability for link
-                                'a[data-asoch-targets*="ctaButton"]',
-                                'a.ns-sbqu4-e-75',
-                                'a.install-button-anchor',
-                                'a[href*="play.google.com/store/apps/details"]',
-                                'a[href*="itunes.apple.com"]'
-                            ];
-
-                            for (const sel of linkSelectors) {
-                                const el = root.querySelector(sel);
-                                const foundLink = el ? cleanLink(el.href) : null;
-                                if (foundLink) {
-                                    data.storeLink = foundLink;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    // B. Find Name if missing
+                    // A. Find Name (Look for text-only headers essentially)
                     if (!data.appName) {
                         const nameSelectors = [
-                            'a[data-asoch-targets*="ochAppName"]',
-                            'a[data-asoch-targets*="AdTitle"]',
-                            '[role="heading"] span',
+                            '[role="heading"]', // Common in text ads
                             '[role="link"] span',
-                            '.short-app-name a',
+                            '.short-app-name a', // Sometimes text ads use this but might not have link
                             'div[class*="app-name"]',
                             'span[class*="app-name"]',
-                            '.app-title'
+                            '.app-title',
+                            'a[data-asoch-targets*="AdTitle"]' // Fallback
                         ];
 
                         for (const sel of nameSelectors) {
                             const elements = root.querySelectorAll(sel);
                             for (const el of elements) {
                                 const txt = el.innerText.trim();
-                                // ONLY accept if NOT the blacklisted advertiser name
                                 if (txt && txt.length > 2 && txt.toLowerCase() !== blacklist) {
                                     data.appName = txt;
-                                    break; // Found a valid name
+                                    break;
                                 }
                             }
                             if (data.appName) break;
+                        }
+                    }
+
+                    // B. Find Link (Separate Button/Link)
+                    if (!data.storeLink) {
+                        const linkSelectors = [
+                            'a[data-asoch-targets*="ochInstallButton"]',
+                            'a[data-asoch-targets*="ctaButton"]',
+                            '.install-button-anchor',
+                            'a.ns-sbqu4-e-75'
+                        ];
+
+                        for (const sel of linkSelectors) {
+                            const el = root.querySelector(sel);
+                            const foundLink = el ? cleanLink(el.href) : null;
+                            if (foundLink) {
+                                data.storeLink = foundLink;
+                                break;
+                            }
+                        }
+
+                        // Fallback Xpath if still not found
+                        if (!data.storeLink) {
+                            const xpath = '//*[@id="portrait-landscape-phone"]/div[1]/div[5]/a[2]';
+                            const xpRes = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                            if (xpRes && xpRes.href) {
+                                const cleanXpLink = cleanLink(xpRes.href);
+                                if (cleanXpLink) data.storeLink = cleanXpLink;
+                            }
                         }
                     }
 
@@ -492,7 +424,11 @@ async function extractAppData(url, browser, attempt = 1) {
 
                 if (frameData.storeLink && result.storeLink === 'NOT_FOUND') result.storeLink = frameData.storeLink;
                 if (frameData.appName && result.appName === 'NOT_FOUND') result.appName = cleanName(frameData.appName);
-                if (frameData.isVideo) result.isVideo = true;
+                // Trust the frame's classification if it found data
+                if (frameData.appName || frameData.storeLink) {
+                    result.isVideo = frameData.isVideo;
+                }
+
                 if (result.storeLink !== 'NOT_FOUND' && result.appName !== 'NOT_FOUND') break;
             } catch (e) { }
         }
