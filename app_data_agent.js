@@ -34,7 +34,7 @@ function pickProxy() {
 }
 
 // Simple in-memory stats to help debug blocking patterns during a run
-const proxyStats = { totalBlocks: 0, perProxy: {} }; 
+const proxyStats = { totalBlocks: 0, perProxy: {} };
 
 // Anti-detection: Rotating User Agents
 const USER_AGENTS = [
@@ -356,45 +356,11 @@ async function extractAppData(url, browser, attempt = 1) {
             } catch (e) { }
         }
 
-        // RegEx fallback for the link from full page source (prefer direct Play / iTunes links)
-        const pageSource = await page.content();
+        // RegEx fallback for the link from full page source (using new_agent.js concept)
         if (result.storeLink === 'NOT_FOUND') {
-            const playMatches = pageSource.match(/https:\/\/play\.google\.com\/store\/apps\/details\?id=[^"'’\s]*/g);
-            if (playMatches) {
-                result.storeLink = playMatches[0];
-            } else {
-                const itunesMatches = pageSource.match(/https:\/\/itunes\.apple\.com\/[^"'’\s]*/g);
-                if (itunesMatches) {
-                    result.storeLink = itunesMatches[0];
-                } else {
-                    const gadMatches = pageSource.match(/https:\/\/www\.googleadservices\.com\/pagead\/aclk[^"'’\s]*/g);
-                    if (gadMatches) {
-                        // Try to find adurl query param inside the googleadservices url
-                        const m = gadMatches[0].match(/[\?&]adurl=([^&\s]+)/i);
-                        if (m && m[1]) {
-                            try {
-                                const decoded = decodeURIComponent(m[1]);
-                                if (decoded.includes('play.google.com') || decoded.includes('itunes.apple.com')) {
-                                    result.storeLink = decoded;
-                                }
-                            } catch (e) { }
-                        }
-                    }
-                }
-            }
-        }
-
-        // HEURISTIC: Search for Android Package Names (com.xxx) in the source code if still not found
-        if (result.storeLink === 'NOT_FOUND' || (result.storeLink && result.storeLink.includes('googleadservices') && !result.storeLink.includes('play.google.com'))) {
-            // Find patterns like "com.company.app" inside quotes
-            const packageMatch = pageSource.match(/["'](com\.[a-z0-9_]+\.[a-z0-9_][a-z0-9_.]+)["']/i);
-            if (packageMatch && packageMatch[1]) {
-                const pkg = packageMatch[1].replace(/\.$/, '');
-                // Check if it looks like a real package (at least 2 dots, e.g. com.example.app)
-                if ((pkg.match(/\./g) || []).length >= 2) {
-                    result.storeLink = `https://play.google.com/store/apps/details?id=${pkg}`;
-                }
-            }
+            const pageSource = await page.content();
+            const matches = pageSource.match(/https:\/\/www\.googleadservices\.com\/pagead\/aclk[^"'’\s]*/g);
+            if (matches) result.storeLink = matches[0];
         }
 
         // If we still don't have appName, try meta tags/title as fallback
@@ -480,7 +446,7 @@ async function extractWithRetry(url, browser) {
 
         while (!handled && proxyAttempts < MAX_PROXY_ATTEMPTS) {
             const proxy = pickProxy();
-            const launchArgs = ['--autoplay-policy=no-user-gesture-required','--disable-blink-features=AutomationControlled','--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'];
+            const launchArgs = ['--autoplay-policy=no-user-gesture-required', '--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'];
             if (proxy) launchArgs.push(`--proxy-server=${proxy}`);
 
             console.log(`  🌐 Launching browser (proxy: ${proxy || 'DIRECT'})`);
@@ -493,7 +459,7 @@ async function extractWithRetry(url, browser) {
                 }));
 
                 // Debug: show extracted results before writing
-                results.forEach(r => console.log(`  → ${r.url.substring(0,80)} => ${r.storeLink} | ${r.appName}`));
+                results.forEach(r => console.log(`  → ${r.url.substring(0, 80)} => ${r.storeLink} | ${r.appName}`));
 
                 if (results.some(r => r.appName === 'BLOCKED')) {
                     console.log('  🛑 Block detected on this proxy. Closing browser and rotating proxy...');
@@ -509,7 +475,7 @@ async function extractWithRetry(url, browser) {
                         process.exit(0);
                     }
                     const wait = PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN);
-                    console.log(`  ⏳ Waiting ${Math.round(wait/1000)}s before next proxy attempt...`);
+                    console.log(`  ⏳ Waiting ${Math.round(wait / 1000)}s before next proxy attempt...`);
                     await new Promise(r => setTimeout(r, wait));
                     continue; // try next proxy
                 }
@@ -530,7 +496,7 @@ async function extractWithRetry(url, browser) {
                     process.exit(0);
                 }
                 const wait = PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN);
-                console.log(`  ⏳ Waiting ${Math.round(wait/1000)}s before next proxy attempt (error)...`);
+                console.log(`  ⏳ Waiting ${Math.round(wait / 1000)}s before next proxy attempt (error)...`);
                 await new Promise(r => setTimeout(r, wait));
             }
         }
