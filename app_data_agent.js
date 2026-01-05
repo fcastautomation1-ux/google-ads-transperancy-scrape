@@ -288,118 +288,183 @@ async function extractAppData(url, browser, attempt = 1) {
                     const data = { appName: null, storeLink: null, isVideo: false };
                     const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
-                    // Helper to clean/extract real link from an href
-                    // This decodes googleadservices redirect URLs to get the actual Play Store link
-                    const cleanLink = (href) => {
-                        if (!href || href.includes('javascript:')) return null;
+                    // =====================================================
+                    // ULTRA-PRECISE STORE LINK EXTRACTOR
+                    // Only accepts REAL Play Store / App Store links
+                    // =====================================================
+                    const extractStoreLink = (href) => {
+                        if (!href || typeof href !== 'string') return null;
+                        if (href.includes('javascript:') || href === '#') return null;
 
-                        // 1. Direct Store Links - accept immediately
-                        if (href.includes('play.google.com') || href.includes('itunes.apple.com')) {
-                            // Make sure it's a direct link, not embedded in a redirect
-                            if (!href.includes('googleadservices') && !href.includes('/pagead/aclk')) {
-                                return href;
-                            }
+                        // Helper to validate it's a REAL store link
+                        const isValidStoreLink = (url) => {
+                            if (!url) return false;
+                            // Must contain play.google.com/store or apps.apple.com or itunes.apple.com
+                            // AND must have an app ID pattern
+                            const isPlayStore = url.includes('play.google.com/store/apps') && url.includes('id=');
+                            const isAppStore = (url.includes('apps.apple.com') || url.includes('itunes.apple.com')) && url.includes('/app/');
+                            return isPlayStore || isAppStore;
+                        };
+
+                        // 1. Check if it's a DIRECT store link
+                        if (isValidStoreLink(href)) {
+                            return href;
                         }
 
-                        // 2. Google Ad Services Redirects - decode to get the real store link
-                        if (href.includes('googleadservices') || href.includes('/pagead/aclk')) {
+                        // 2. Decode Google Ad Services redirect
+                        if (href.includes('googleadservices.com') || href.includes('/pagead/aclk')) {
                             try {
-                                const m = href.match(/[\?&]adurl=([^&\s]+)/i);
-                                if (m && m[1]) {
-                                    const decoded = decodeURIComponent(m[1]);
-                                    // Only accept if it decodes to a Store Link
-                                    if (decoded.includes('play.google.com') || decoded.includes('itunes.apple.com')) {
-                                        return decoded;
+                                // Try multiple URL parameter patterns Google uses
+                                const patterns = [
+                                    /[?&]adurl=([^&\s]+)/i,
+                                    /[?&]dest=([^&\s]+)/i,
+                                    /[?&]url=([^&\s]+)/i
+                                ];
+                                for (const pattern of patterns) {
+                                    const match = href.match(pattern);
+                                    if (match && match[1]) {
+                                        const decoded = decodeURIComponent(match[1]);
+                                        if (isValidStoreLink(decoded)) {
+                                            return decoded;
+                                        }
                                     }
                                 }
                             } catch (e) { }
                         }
 
-                        return null; // No store link found
+                        // 3. Last resort: look for embedded store URL anywhere in the href
+                        try {
+                            // Play Store pattern
+                            const playMatch = href.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
+                            if (playMatch && playMatch[1]) return playMatch[1];
+
+                            // App Store pattern
+                            const appMatch = href.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"']+\/app\/[^\s&"']+)/);
+                            if (appMatch && appMatch[1]) return appMatch[1];
+                        } catch (e) { }
+
+                        return null; // STRICT: No valid store link found
                     };
 
-                    // Helper to clean text and remove CSS garbage from app names
-                    const cleanText = (text) => {
-                        if (!text) return null;
-                        let clean = text;
+                    // =====================================================
+                    // CLEAN APP NAME (Remove CSS garbage, duplicates)
+                    // =====================================================
+                    const cleanAppName = (text) => {
+                        if (!text || typeof text !== 'string') return null;
+                        let clean = text.trim();
 
-                        // Remove CSS class-like patterns: .className-subClass-etc
-                        clean = clean.replace(/\.[\w-]+/g, ' ');
+                        // Remove invisible Unicode chars
+                        clean = clean.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '');
 
-                        // Remove CSS style patterns: font-size:16px; line-height:20px;
-                        clean = clean.replace(/[\w-]+:\s*[\w\d%px]+;?/g, ' ');
+                        // Remove CSS class patterns (.class-name)
+                        clean = clean.replace(/\.[a-zA-Z][\w-]*/g, ' ');
 
-                        // Remove asterisks used as separators in the garbage
-                        clean = clean.replace(/\*+/g, ' ');
+                        // Remove CSS style patterns (property: value;)
+                        clean = clean.replace(/[a-zA-Z-]+\s*:\s*[^;]+;/g, ' ');
 
-                        // Collapse multiple spaces and trim
+                        // Remove Google separator
+                        clean = clean.split('!@~!@~')[0];
+
+                        // Handle duplicates like "AppName | AppName"
+                        if (clean.includes('|')) {
+                            const parts = clean.split('|').map(p => p.trim()).filter(p => p.length > 2);
+                            if (parts.length > 0) clean = parts[0];
+                        }
+
+                        // Final cleanup
                         clean = clean.replace(/\s+/g, ' ').trim();
 
-                        // If what's left is too short, reject it
-                        if (clean.length < 3) return null;
+                        // Reject if too short or just numbers/symbols
+                        if (clean.length < 2) return null;
+                        if (/^[\d\s\W]+$/.test(clean)) return null;
 
                         return clean;
                     };
 
-                    // CLASSIFICATION STRATEGY (Based on User Structure Observation)
-                    // Video Ads: Name and Link are in the SAME anchor tag (ochAppName).
-                    // Text Ads: Name is just text (no link), Link is separate or missing/in a different button.
+                    // =====================================================
+                    // PRECISE EXTRACTION STRATEGY
+                    // Priority: Find anchor with BOTH app name text AND valid store link
+                    // =====================================================
 
-                    data.isVideo = false; // Default to Text
+                    // PRIORITY 1: The exact element from screenshot - anchor with data-asoch-targets containing app name
+                    const appNameSelectors = [
+                        'a[data-asoch-targets*="appname" i]',      // Case insensitive appname
+                        'a[data-asoch-targets*="AppName" i]',      // ochAppName variations
+                        'a[data-asoch-targets*="app-name" i]',     // Hyphenated
+                        'a[data-asoch-targets*="rrappname" i]',    // From screenshot: adl.m/rrappname
+                        'a[class*="short-app-name"]',              // Class-based
+                        '.short-app-name a'                        // Child anchor of short-app-name
+                    ];
 
-                    // 1. Try to find the "Video Ad" structure (Combined Name + Link)
-                    const combinedSelector = 'a[data-asoch-targets*="ochAppName"]';
-                    const combinedEl = root.querySelector(combinedSelector);
+                    for (const selector of appNameSelectors) {
+                        const elements = root.querySelectorAll(selector);
+                        for (const el of elements) {
+                            const rawName = el.innerText || el.textContent || '';
+                            const appName = cleanAppName(rawName);
 
-                    if (combinedEl) {
-                        const rawTxt = combinedEl.innerText.trim();
-                        const txt = cleanText(rawTxt); // Clean CSS garbage
-                        // Check if name is valid (not blacklisted)
-                        if (txt && txt.length > 2 && txt.toLowerCase() !== blacklist) {
-                            // ONLY use the link from ochAppName itself - this is what differentiates Video from Text ads
-                            // Video Ads: ochAppName anchor HREF contains the store link
-                            // Text Ads: ochAppName anchor HREF does NOT have a store link (or no href at all)
-                            const extractedLink = cleanLink(combinedEl.href);
+                            // Skip if name is invalid or matches blacklist (advertiser name)
+                            if (!appName || appName.toLowerCase() === blacklist) continue;
 
-                            // If ochAppName has BOTH Name and Link -> IT IS A VIDEO AD
-                            if (extractedLink) {
-                                data.appName = txt;
-                                data.storeLink = extractedLink;
-                                data.isVideo = true; // Confirmed VIDEO AD structure
-                                return data; // Return immediately
-                            } else {
-                                // ochAppName has name but NO link -> This is a TEXT AD
-                                data.appName = txt;
-                                data.storeLink = null; // Explicitly no link
-                                data.isVideo = false;
-                                return data;
+                            // Try to extract store link from this SAME element
+                            const storeLink = extractStoreLink(el.href);
+
+                            if (appName && storeLink) {
+                                // FOUND BOTH - This is a Video Ad with valid data
+                                return {
+                                    appName: appName,
+                                    storeLink: storeLink,
+                                    isVideo: true
+                                };
+                            } else if (appName && !storeLink) {
+                                // Has name but no valid store link in this element
+                                // Store the name and continue looking (might find better match)
+                                if (!data.appName) {
+                                    data.appName = appName;
+                                }
                             }
                         }
                     }
 
-                    // 2. Fallback: Separate Extraction (Likely a Text/Image Ad)
-                    // If we are here, it means we didn't find the "Video Ad" structure (Combined).
-                    // We will search for Name and Link separately.
-
-                    // A. Find Name (Look for text-only headers essentially)
-                    if (!data.appName) {
-                        const nameSelectors = [
-                            '[role="heading"]', // Common in text ads
-                            '[role="link"] span',
-                            '.short-app-name a', // Sometimes text ads use this but might not have link
-                            'div[class*="app-name"]',
-                            'span[class*="app-name"]',
-                            '.app-title',
-                            'a[data-asoch-targets*="AdTitle"]' // Fallback
+                    // PRIORITY 2: Look for Install button with store link (backup for link only)
+                    if (data.appName && !data.storeLink) {
+                        const installSelectors = [
+                            'a[data-asoch-targets*="Install" i]',
+                            'a[data-asoch-targets*="install" i]',
+                            'a[aria-label*="Install" i]',
+                            'button[data-asoch-targets*="Install" i]',
+                            '.install-button a',
+                            'a[class*="install"]'
                         ];
 
-                        for (const sel of nameSelectors) {
-                            const elements = root.querySelectorAll(sel);
+                        for (const selector of installSelectors) {
+                            const el = root.querySelector(selector);
+                            if (el && el.href) {
+                                const storeLink = extractStoreLink(el.href);
+                                if (storeLink) {
+                                    data.storeLink = storeLink;
+                                    data.isVideo = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // PRIORITY 3: Fallback for app name only (Text/Image ads)
+                    if (!data.appName) {
+                        const textNameSelectors = [
+                            '[role="heading"]',
+                            'div[class*="app-name"]',
+                            'span[class*="app-name"]',
+                            '.app-title'
+                        ];
+
+                        for (const selector of textNameSelectors) {
+                            const elements = root.querySelectorAll(selector);
                             for (const el of elements) {
-                                const rawTxt = el.innerText.trim();
-                                const txt = cleanText(rawTxt); // Clean CSS garbage
-                                if (txt && txt.length > 2 && txt.toLowerCase() !== blacklist) {
-                                    data.appName = txt;
+                                const rawName = el.innerText || el.textContent || '';
+                                const appName = cleanAppName(rawName);
+                                if (appName && appName.toLowerCase() !== blacklist) {
+                                    data.appName = appName;
                                     break;
                                 }
                             }
@@ -407,10 +472,9 @@ async function extractAppData(url, browser, attempt = 1) {
                         }
                     }
 
-                    // B. For Text Ads (Strategy 2), DO NOT search for links
-                    // User explicitly requested: "mention not found in test ads plstyore link"
-                    // Set storeLink to null explicitly for Text Ads
-                    data.storeLink = null;
+                    // STRICT RULE: If we have a name but no store link was found
+                    // in the EXACT app name element, DO NOT search elsewhere
+                    // This prevents picking up wrong/dummy links from other parts of the page
 
                     return data;
                 }, blacklistName);
