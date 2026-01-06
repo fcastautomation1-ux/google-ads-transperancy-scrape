@@ -119,8 +119,11 @@ async function batchWriteToSheet(sheets, updates) {
     if (updates.length === 0) return;
 
     const data = [];
-    updates.forEach(({ rowIndex, storeLink, appName, videoId }) => {
+    updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId }) => {
         const rowNum = rowIndex + 1;
+        if (advertiserName && advertiserName !== 'SKIP') {
+            data.push({ range: `${SHEET_NAME}!A${rowNum}`, values: [[advertiserName]] });
+        }
         if (storeLink && storeLink !== 'SKIP') {
             data.push({ range: `${SHEET_NAME}!C${rowNum}`, values: [[storeLink]] });
         }
@@ -178,6 +181,7 @@ async function triggerSelfRestart() {
 async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, existingStoreLink, attempt = 1) {
     const page = await browser.newPage();
     let result = {
+        advertiserName: 'SKIP',
         appName: needsMetadata ? 'NOT_FOUND' : 'SKIP',
         storeLink: needsMetadata ? 'NOT_FOUND' : 'SKIP',
         videoId: 'SKIP'
@@ -251,7 +255,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             content.toLowerCase().includes('verify you are human')) {
             console.error('  ⚠️ BLOCKED');
             await page.close();
-            return { appName: 'BLOCKED', storeLink: 'BLOCKED', videoId: 'BLOCKED' };
+            return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED', videoId: 'BLOCKED' };
         }
 
         // Wait with jitter
@@ -298,11 +302,13 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     return false;
                 };
                 return {
+                    advertiserName: topTitle ? topTitle.innerText.trim() : '',
                     blacklist: topTitle ? topTitle.innerText.trim().toLowerCase() : '',
                     isVideo: checkVideo()
                 };
             });
             const blacklistName = mainPageInfo.blacklist;
+            result.advertiserName = mainPageInfo.advertiserName || 'NOT_FOUND';
 
             // Find visible iframes
             const visibleAdInfo = await page.evaluate(() => {
@@ -609,7 +615,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
     } catch (err) {
         console.error(`  ❌ Error: ${err.message}`);
         await page.close();
-        return { appName: 'ERROR', storeLink: 'ERROR', videoId: 'ERROR' };
+        return { advertiserName: 'ERROR', appName: 'ERROR', storeLink: 'ERROR', videoId: 'ERROR' };
     }
 }
 
@@ -635,7 +641,7 @@ async function extractWithRetry(item, browser) {
 
         await randomDelay(2000, 4000);
     }
-    return { storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', videoId: 'NOT_FOUND' };
+    return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', videoId: 'NOT_FOUND' };
 }
 
 // ============================================
@@ -697,6 +703,7 @@ async function extractWithRetry(item, browser) {
                     const data = await extractWithRetry(item, browser);
                     return {
                         rowIndex: item.rowIndex,
+                        advertiserName: data.advertiserName,
                         storeLink: data.storeLink,
                         appName: data.appName,
                         videoId: data.videoId
@@ -704,7 +711,7 @@ async function extractWithRetry(item, browser) {
                 }));
 
                 results.forEach(r => {
-                    console.log(`  → Row ${r.rowIndex + 1}: Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | Video=${r.videoId}`);
+                    console.log(`  → Row ${r.rowIndex + 1}: Advertiser=${r.advertiserName} | Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | Video=${r.videoId}`);
                 });
 
                 if (results.some(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED')) {
