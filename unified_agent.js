@@ -18,6 +18,20 @@ puppeteer.use(StealthPlugin());
 const { google } = require('googleapis');
 const fs = require('fs');
 
+// GLOBAL ERROR HANDLERS FOR "RUN IN EVERY CONDITION"
+process.on('uncaughtException', async (err) => {
+    console.error('\n🔥 UNCAUGHT EXCEPTION:', err.message);
+    if (err.stack) console.error(err.stack);
+    await triggerSelfRestart();
+    process.exit(1);
+});
+
+process.on('unhandledRejection', async (reason, promise) => {
+    console.error('\n🔥 UNHANDLED REJECTION at:', promise, 'reason:', reason);
+    await triggerSelfRestart();
+    process.exit(1);
+});
+
 // ============================================
 // CONFIGURATION
 // ============================================

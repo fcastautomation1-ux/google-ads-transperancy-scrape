@@ -2,24 +2,22 @@ name: Unified Google Ads Agent
 
 on:
   schedule:
-    # Runs 4 times per day (every 6 hours) for 24/7 coverage
-    # Pakistan Time is UTC+5
     - cron: '0 0 * * *'   # 5:00 AM PKT
     - cron: '0 6 * * *'   # 11:00 AM PKT
     - cron: '0 12 * * *'  # 5:00 PM PKT
     - cron: '0 18 * * *'  # 11:00 PM PKT
-  workflow_dispatch: # Allows manual triggering
+  workflow_dispatch:
   repository_dispatch:
     types: [unified_agent_trigger]
 
 concurrency:
   group: unified-agent-group
-  cancel-in-progress: true
+  cancel-in-progress: false # Change to false to ensure we don't kill a job that's making progress
 
 jobs:
   run-unified-agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 355 # 5 hours 55 minutes - stops before 6-hour GitHub limit
+    timeout-minutes: 355
     
     steps:
       - name: Checkout repository
@@ -30,6 +28,11 @@ jobs:
         with:
           node-version: '18'
           cache: 'npm'
+
+      - name: Install system dependencies for Puppeteer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgbm1 libasound2 libnss3 libxss1 libatk-bridge2.0-0 libgtk-3-0 libxshmfence1
       
       - name: Install dependencies
         run: npm ci
@@ -44,16 +47,26 @@ jobs:
       - name: Log run start
         run: |
           echo "🚀 Starting UNIFIED Google Ads Agent at $(date)"
-          echo "📋 This agent extracts: App Link, App Name, and Video ID"
-          echo "⏰ Processing for up to 5h 55m"
+          echo "📊 System environment: $(uname -a)"
       
       - name: Run unified agent script
+        id: run_script
         run: node unified_agent.js
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           CONCURRENT_PAGES: 2
       
+      - name: Auto-restart on failure
+        if: failure()
+        run: |
+          echo "⚠️ Workflow failed. Triggering immediate restart..."
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/dispatches \
+            -d '{"event_type": "unified_agent_trigger"}'
+
       - name: Cleanup credentials
         if: always()
         run: rm -f credentials.json
