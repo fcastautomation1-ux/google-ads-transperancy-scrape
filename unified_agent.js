@@ -30,8 +30,8 @@ const MAX_RETRIES = 3;
 const POST_CLICK_WAIT = 8000; // Reduced from 12s
 const RETRY_WAIT_MULTIPLIER = 1.3; // Reduced from 1.5
 
-const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 2000; // Reduced from 8s
-const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 5000; // Reduced from 20s
+const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 5000; // Increased for accuracy
+const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 10000; // Increased for accuracy
 
 const PROXIES = process.env.PROXIES ? process.env.PROXIES.split(';').map(p => p.trim()).filter(Boolean) : [];
 const MAX_PROXY_ATTEMPTS = parseInt(process.env.MAX_PROXY_ATTEMPTS) || Math.max(3, PROXIES.length);
@@ -223,10 +223,9 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
         await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
 
-        // Reduced WAIT_UNTIL to domcontentloaded for faster start, then wait for network if needed
-        const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: MAX_WAIT_TIME });
+        // Increased wait strategy for accuracy - iframes need time to render content
+        const response = await page.goto(url, { waitUntil: 'networkidle2', timeout: MAX_WAIT_TIME });
 
-        // Block detection from app_data_agent.js
         const content = await page.content();
         if ((response && response.status && response.status() === 429) ||
             content.includes('Our systems have detected unusual traffic') ||
@@ -239,119 +238,81 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED', videoId: 'BLOCKED' };
         }
 
-        // Wait with jitter (Reduced for speed)
-        const baseWait = 1500 + Math.random() * 1500;
+        // Wait for dynamic elements to settle (increased for accuracy)
+        const baseWait = 4000 + Math.random() * 3000;
         const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
         await sleep(baseWait * attemptMultiplier);
 
-        // Human-like scrolling from app_data_agent.js
+        // Human-like interaction
         await page.evaluate(async () => {
-            const randomScroll = 600 + Math.random() * 400;
-            window.scrollBy(0, randomScroll);
-            await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
-            window.scrollBy(0, -randomScroll / 2);
-            await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+            window.scrollBy(0, 300);
+            await new Promise(r => setTimeout(r, 400));
+            window.scrollBy(0, -100);
         });
 
-        try {
-            await page.mouse.move(100 + Math.random() * 500, 100 + Math.random() * 300);
-            await sleep(300 + Math.random() * 500);
-        } catch (e) { }
-
-        await randomDelay(500, 1000);
-
         // =====================================================
-        // PHASE 1: METADATA EXTRACTION (from app_data_agent.js)
+        // PHASE 1: METADATA EXTRACTION
         // =====================================================
         if (needsMetadata) {
             console.log(`  📊 Extracting metadata...`);
 
             const mainPageInfo = await page.evaluate(() => {
-                const topTitle = document.querySelector('h1, .advertiser-name, .ad-details-heading');
+                const getSafeText = (sel) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return null;
+                    const text = el.innerText.trim();
+                    const blacklistWords = ['ad details', 'google ads', 'transparency center', 'about this ad'];
+                    if (!text || blacklistWords.some(word => text.toLowerCase().includes(word)) || text.length < 2) return null;
+                    return text;
+                };
+
+                const advertiserSelectors = [
+                    '.advertiser-name',
+                    '.advertiser-name-container',
+                    'h1',
+                    '.creative-details-page-header-text',
+                    '.ad-details-heading'
+                ];
+
+                let advertiserName = null;
+                for (const sel of advertiserSelectors) {
+                    advertiserName = getSafeText(sel);
+                    if (advertiserName) break;
+                }
+
                 const checkVideo = () => {
                     const videoEl = document.querySelector('video');
                     if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return true;
-                    const formatText = document.body.innerText;
-                    if (formatText.includes('Format: Video')) {
-                        const playBtn = document.querySelector('[aria-label*="Play" i], .material-icons, .goog-icon');
-                        if (playBtn) {
-                            if (playBtn.innerText.includes('play_arrow') || playBtn.innerText.includes('play_circle')) return true;
-                            const label = playBtn.getAttribute('aria-label') || '';
-                            if (label.toLowerCase().includes('play')) return true;
-                        }
-                    }
-                    return false;
+                    return document.body.innerText.includes('Format: Video');
                 };
+
                 return {
-                    advertiserName: topTitle ? topTitle.innerText.trim() : '',
-                    blacklist: topTitle ? topTitle.innerText.trim().toLowerCase() : '',
+                    advertiserName: advertiserName || 'NOT_FOUND',
+                    blacklist: advertiserName ? advertiserName.toLowerCase() : '',
                     isVideo: checkVideo()
                 };
             });
+
             const blacklistName = mainPageInfo.blacklist;
-            result.advertiserName = mainPageInfo.advertiserName || 'NOT_FOUND';
+            result.advertiserName = mainPageInfo.advertiserName;
 
-            // Find visible iframes
-            const visibleAdInfo = await page.evaluate(() => {
-                const iframes = document.querySelectorAll('iframe');
-                const visibleFrameUrls = [];
-                iframes.forEach(iframe => {
-                    const rect = iframe.getBoundingClientRect();
-                    const style = window.getComputedStyle(iframe);
-                    const isVisible = rect.width > 50 && rect.height > 50 &&
-                        style.display !== 'none' &&
-                        style.visibility !== 'hidden' &&
-                        parseFloat(style.opacity) > 0;
-
-                    let parent = iframe.parentElement;
-                    let parentVisible = true;
-                    while (parent) {
-                        const parentStyle = window.getComputedStyle(parent);
-                        if (parentStyle.display === 'none' ||
-                            parentStyle.visibility === 'hidden' ||
-                            parseFloat(parentStyle.opacity) === 0) {
-                            parentVisible = false;
-                            break;
-                        }
-                        parent = parent.parentElement;
-                    }
-
-                    if (isVisible && parentVisible) {
-                        visibleFrameUrls.push(iframe.src || iframe.name || 'unnamed');
-                    }
-                });
-                return { visibleFrameUrls, totalFrames: iframes.length };
-            });
-
-            console.log(`  📊 Found ${visibleAdInfo.totalFrames} iframes, ${visibleAdInfo.visibleFrameUrls.length} visible`);
-
-            // Extract from frames (EXACT from app_data_agent.js)
             const frames = page.frames();
             for (const frame of frames) {
                 try {
                     const frameData = await frame.evaluate((blacklist) => {
-                        const data = { appName: null, storeLink: null, isVideo: false };
-                        const root = document.querySelector('#portrait-landscape-phone') || document.body;
-
-                        const bodyRect = document.body.getBoundingClientRect();
-                        if (bodyRect.width < 50 || bodyRect.height < 50) {
-                            return { ...data, isHidden: true };
-                        }
+                        const data = { appName: null, storeLink: null };
 
                         const extractStoreLink = (href) => {
                             if (!href || typeof href !== 'string') return null;
-                            if (href.includes('javascript:') || href === '#') return null;
-
                             const isValidStoreLink = (url) => {
                                 if (!url) return false;
-                                const isPlayStore = url.includes('play.google.com/store/apps') && url.includes('id=');
-                                const isAppStore = (url.includes('apps.apple.com') || url.includes('itunes.apple.com')) && url.includes('/app/');
-                                return isPlayStore || isAppStore;
+                                return (url.includes('play.google.com/store/apps/details') && url.includes('id=')) ||
+                                    ((url.includes('apps.apple.com') || url.includes('itunes.apple.com')) && url.includes('/app/'));
                             };
-
                             if (isValidStoreLink(href)) return href;
 
-                            if (href.includes('googleadservices.com') || href.includes('/pagead/aclk')) {
+                            // Check for adurl in redirects
+                            if (href.includes('adurl=') || href.includes('dest=') || href.includes('url=')) {
                                 try {
                                     const patterns = [/[?&]adurl=([^&\s]+)/i, /[?&]dest=([^&\s]+)/i, /[?&]url=([^&\s]+)/i];
                                     for (const pattern of patterns) {
@@ -363,86 +324,51 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                     }
                                 } catch (e) { }
                             }
-
-                            try {
-                                const playMatch = href.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
-                                if (playMatch && playMatch[1]) return playMatch[1];
-                                const appMatch = href.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"']+\/app\/[^\s&"']+)/);
-                                if (appMatch && appMatch[1]) return appMatch[1];
-                            } catch (e) { }
-
                             return null;
                         };
 
                         const cleanAppName = (text) => {
                             if (!text || typeof text !== 'string') return null;
-                            let clean = text.trim();
-                            clean = clean.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '');
-                            clean = clean.replace(/\.[a-zA-Z][\w-]*/g, ' ');
-                            clean = clean.replace(/[a-zA-Z-]+\s*:\s*[^;]+;/g, ' ');
-                            clean = clean.split('!@~!@~')[0];
-                            if (clean.includes('|')) {
-                                const parts = clean.split('|').map(p => p.trim()).filter(p => p.length > 2);
-                                if (parts.length > 0) clean = parts[0];
-                            }
-                            clean = clean.replace(/\s+/g, ' ').trim();
-                            if (clean.length < 2) return null;
-                            if (/^[\d\s\W]+$/.test(clean)) return null;
-                            return clean;
+                            let clean = text.trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
+                            const badWords = ['ad details', 'install', 'download', 'google ads', 'visit site', 'open', 'play'];
+                            if (badWords.some(w => clean.toLowerCase().includes(w)) && clean.length < 15) return null;
+                            if (clean.toLowerCase() === blacklist) return null;
+                            return clean.split('|')[0].split('!@~!@~')[0].trim();
                         };
 
-                        const appNameSelectors = [
-                            'a[data-asoch-targets*="ochAppName"]',
-                            'a[data-asoch-targets*="appname" i]',
-                            'a[data-asoch-targets*="rrappname" i]',
-                            'a[class*="short-app-name"]',
-                            '.short-app-name a'
-                        ];
+                        // 1. Scan ALL links for store patterns
+                        const allLinks = Array.from(document.querySelectorAll('a'));
+                        for (const link of allLinks) {
+                            const linkHref = link.href;
+                            const extracted = extractStoreLink(linkHref);
+                            if (extracted) {
+                                data.storeLink = extracted;
 
-                        for (const selector of appNameSelectors) {
-                            const elements = root.querySelectorAll(selector);
-                            for (const el of elements) {
-                                const rawName = el.innerText || el.textContent || '';
-                                const appName = cleanAppName(rawName);
-                                if (!appName || appName.toLowerCase() === blacklist) continue;
-
-                                const storeLink = extractStoreLink(el.href);
-                                if (appName && storeLink) {
-                                    return { appName, storeLink, isVideo: true, isHidden: false };
-                                } else if (appName && !data.appName) {
-                                    data.appName = appName;
+                                // Try to get name from common app name nearby or data-attributes
+                                const nameAttr = link.getAttribute('data-asoch-targets');
+                                if (nameAttr && (nameAttr.includes('AppName') || nameAttr.includes('appname'))) {
+                                    const cleaned = cleanAppName(link.innerText || link.textContent);
+                                    if (cleaned) data.appName = cleaned;
                                 }
                             }
                         }
 
-                        if (data.appName && !data.storeLink) {
-                            const installSels = [
-                                'a[data-asoch-targets*="ochButton"]',
-                                'a[data-asoch-targets*="Install" i]',
-                                'a[aria-label*="Install" i]'
-                            ];
-                            for (const sel of installSels) {
-                                const el = root.querySelector(sel);
-                                if (el && el.href) {
-                                    const storeLink = extractStoreLink(el.href);
-                                    if (storeLink) {
-                                        data.storeLink = storeLink;
-                                        data.isVideo = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
+                        // 2. Scan structured selectors for App Name if not found
                         if (!data.appName) {
-                            const textSels = ['[role="heading"]', 'div[class*="app-name"]', '.app-title'];
-                            for (const sel of textSels) {
-                                const elements = root.querySelectorAll(sel);
-                                for (const el of elements) {
-                                    const rawName = el.innerText || el.textContent || '';
-                                    const appName = cleanAppName(rawName);
-                                    if (appName && appName.toLowerCase() !== blacklist) {
-                                        data.appName = appName;
+                            const nameSels = [
+                                'a[data-asoch-targets*="AppName"]',
+                                'a[data-asoch-targets*="appname" i]',
+                                '.short-app-name',
+                                'div[class*="app-name"]',
+                                '[role="heading"]',
+                                '.app-title'
+                            ];
+                            for (const sel of nameSels) {
+                                const els = document.querySelectorAll(sel);
+                                for (const el of els) {
+                                    const cleaned = cleanAppName(el.innerText || el.textContent);
+                                    if (cleaned) {
+                                        data.appName = cleaned;
                                         break;
                                     }
                                 }
@@ -450,50 +376,27 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             }
                         }
 
-                        data.isHidden = false;
                         return data;
                     }, blacklistName);
 
-                    if (frameData.isHidden) continue;
-
-                    if (frameData.appName && frameData.storeLink && result.appName === 'NOT_FOUND') {
-                        result.appName = cleanName(frameData.appName);
+                    if (frameData.appName && !result.appName || result.appName === 'NOT_FOUND') {
+                        if (frameData.appName) result.appName = cleanName(frameData.appName);
+                    }
+                    if (frameData.storeLink && (result.storeLink === 'NOT_FOUND' || result.storeLink === 'SKIP')) {
                         result.storeLink = frameData.storeLink;
-                        console.log(`  ✓ Found: ${result.appName} -> ${result.storeLink.substring(0, 60)}...`);
-                        break;
                     }
 
-                    if (frameData.appName && !frameData.storeLink && result.appName === 'NOT_FOUND') {
-                        result.appName = cleanName(frameData.appName);
-                    }
+                    if (result.appName !== 'NOT_FOUND' && result.storeLink !== 'NOT_FOUND') break;
                 } catch (e) { }
             }
 
-            // Meta tags fallback
-            if (result.appName === 'NOT_FOUND') {
+            // Final fallback from Meta/Title
+            if (result.appName === 'NOT_FOUND' || result.appName === 'Ad Details') {
                 try {
-                    const pageSource = await page.content();
-                    const metaOg = pageSource.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i);
-                    if (metaOg && metaOg[1]) result.appName = metaOg[1].trim();
-                    if (result.appName === 'NOT_FOUND') {
-                        const metaTitle = pageSource.match(/<meta[^>]+name=["']title["'][^>]+content=["']([^"']+)["']/i);
-                        if (metaTitle && metaTitle[1]) result.appName = metaTitle[1].trim();
+                    const title = await page.title();
+                    if (title && !title.toLowerCase().includes('google ads')) {
+                        result.appName = title.split(' - ')[0].split('|')[0].trim();
                     }
-                    if (result.appName === 'NOT_FOUND') {
-                        const titleTag = pageSource.match(/<title>([^<]+)<\/title>/i);
-                        if (titleTag && titleTag[1]) {
-                            result.appName = titleTag[1].split('|')[0].split('-')[0].trim();
-                        }
-                    }
-                } catch (e) { }
-            }
-
-            // Clean store link
-            if (result.storeLink !== 'NOT_FOUND' && result.storeLink.includes('adurl=')) {
-                try {
-                    const urlObj = new URL(result.storeLink);
-                    const adUrl = urlObj.searchParams.get('adurl');
-                    if (adUrl && adUrl.startsWith('http')) result.storeLink = adUrl;
                 } catch (e) { }
             }
         }
