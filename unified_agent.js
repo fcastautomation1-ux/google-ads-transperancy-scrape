@@ -515,15 +515,20 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
         // =====================================================
         // PHASE 2: VIDEO ID EXTRACTION
-        // ONLY extract video ID if we have a valid store link
+        // SPEED OPTIMIZED: Only extract from Play Store
+        // Apple apps are SKIPPED (no Google video IDs)
         // =====================================================
         const finalStoreLink = result.storeLink !== 'SKIP' ? result.storeLink : existingStoreLink;
-        const hasValidLink = finalStoreLink &&
-            finalStoreLink !== 'NOT_FOUND' &&
-            (finalStoreLink.includes('play.google.com') || finalStoreLink.includes('apps.apple.com'));
+        const isPlayStore = finalStoreLink && finalStoreLink !== 'NOT_FOUND' && finalStoreLink.includes('play.google.com');
+        const isAppleStore = finalStoreLink && finalStoreLink !== 'NOT_FOUND' && finalStoreLink.includes('apps.apple.com');
 
-        // Only try to extract video ID if there's a valid app store link
-        if (hasValidLink && (needsVideoId || needsMetadata)) {
+        // SPEED: Apple ads skip video extraction instantly
+        if (isAppleStore) {
+            result.videoId = 'SKIP';
+            console.log(`  🍏 Apple App - skipping video (instant)`);
+        }
+        // Only extract video ID for Play Store ads
+        else if (isPlayStore && (needsVideoId || needsMetadata)) {
             console.log(`  🎬 Extracting Video ID...`);
 
             // Find and click play button (EXACT from agent.js)
@@ -607,7 +612,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     result.videoId = 'NOT_FOUND';
                 }
             } else {
-                result.videoId = hasValidLink ? 'NOT_FOUND' : 'SKIP';
+                result.videoId = 'NOT_FOUND';
                 console.log(`  ⚠️ No play button found`);
             }
         }
@@ -641,18 +646,18 @@ async function extractWithRetry(item, browser) {
             ? data.storeLink
             : item.existingStoreLink;
 
-        const hasValidLink = currentStoreLink &&
-            (currentStoreLink.includes('play.google.com') || currentStoreLink.includes('apps.apple.com'));
+        const isPlayStore = currentStoreLink && currentStoreLink.includes('play.google.com');
+        const isAppleStore = currentStoreLink && currentStoreLink.includes('apps.apple.com');
 
         // Success criteria:
         // 1. If we needed metadata, did we find it? (at least one of appName or storeLink)
         const metadataSuccess = !item.needsMetadata || (data.storeLink !== 'NOT_FOUND' || data.appName !== 'NOT_FOUND');
 
-        // 2. If we have a valid link, do we have a video ID?
-        // We only consider it a videoSuccess if:
-        // - There is no valid link (text ad) -> always success/skip
-        // - There is a valid link AND we got a video ID
-        const videoSuccess = !hasValidLink || (data.videoId !== 'NOT_FOUND' && data.videoId !== 'SKIP' && data.videoId !== null);
+        // 2. Video ID success (SPEED OPTIMIZED):
+        // - Apple Store: always success (SKIP is fine, no retries needed)
+        // - Play Store: need actual video ID (NOT_FOUND = retry)
+        // - Text ad: always success (no video expected)
+        const videoSuccess = isAppleStore || !isPlayStore || (data.videoId !== 'NOT_FOUND' && data.videoId !== null);
 
         // We only return if BOTH are successful
         if (metadataSuccess && videoSuccess) {
