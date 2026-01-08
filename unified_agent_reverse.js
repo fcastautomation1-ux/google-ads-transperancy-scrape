@@ -675,15 +675,76 @@ async function extractWithRetry(item, browser) {
 }
 
 // ============================================
+// PROGRESS TRACKING
+// ============================================
+const progressStats = {
+    totalRows: 0,
+    processed: 0,
+    success: 0,
+    failed: 0,
+    skipped: 0,
+    blocked: 0,
+    startTime: null,
+    lastBatchTime: null,
+    batchTimes: []
+};
+
+function formatDuration(ms) {
+    if (ms < 0) ms = 0;
+    const seconds = Math.floor(ms / 1000) % 60;
+    const minutes = Math.floor(ms / (1000 * 60)) % 60;
+    const hours = Math.floor(ms / (1000 * 60 * 60));
+    if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+    if (minutes > 0) return `${minutes}m ${seconds}s`;
+    return `${seconds}s`;
+}
+
+function getProgressBar(percent, width = 20) {
+    const filled = Math.round(width * percent / 100);
+    const empty = width - filled;
+    return `[${'█'.repeat(filled)}${'░'.repeat(empty)}]`;
+}
+
+function logProgress(message = '') {
+    const elapsed = Date.now() - progressStats.startTime;
+    const percent = progressStats.totalRows > 0
+        ? ((progressStats.processed / progressStats.totalRows) * 100).toFixed(2)
+        : 0;
+
+    // Calculate speed (pages per minute)
+    const pagesPerMinute = elapsed > 0
+        ? ((progressStats.processed / elapsed) * 60000).toFixed(1)
+        : 0;
+
+    // Calculate ETA
+    const remaining = progressStats.totalRows - progressStats.processed;
+    const avgBatchTime = progressStats.batchTimes.length > 0
+        ? progressStats.batchTimes.reduce((a, b) => a + b, 0) / progressStats.batchTimes.length
+        : 45000; // default 45s per batch
+    const etaMs = (remaining / CONCURRENT_PAGES) * avgBatchTime;
+
+    console.log(`\n${'═'.repeat(70)}`);
+    console.log(`📊 PROGRESS [REVERSE]: ${getProgressBar(parseFloat(percent))} ${percent}%`);
+    console.log(`   ✅ Processed: ${progressStats.processed.toLocaleString()} / ${progressStats.totalRows.toLocaleString()}`);
+    console.log(`   📈 Success: ${progressStats.success} | ❌ Failed: ${progressStats.failed} | ⏭️ Skipped: ${progressStats.skipped} | 🛑 Blocked: ${progressStats.blocked}`);
+    console.log(`   ⚡ Speed: ${pagesPerMinute} pages/min | ⏱️ Elapsed: ${formatDuration(elapsed)} | 🏁 ETA: ${formatDuration(etaMs)}`);
+    if (message) console.log(`   💬 ${message}`);
+    console.log(`${'═'.repeat(70)}\n`);
+}
+
+// ============================================
 // MAIN EXECUTION
 // ============================================
 (async () => {
-    console.log(`🤖 Starting UNIFIED Google Ads Agent (REVERSE MODE)...\n`);
+    console.log(`\n${'═'.repeat(70)}`);
+    console.log(`🤖 UNIFIED GOOGLE ADS AGENT - REVERSE MODE`);
+    console.log(`${'═'.repeat(70)}`);
     console.log(`📋 Sheet: ${SHEET_NAME}`);
     console.log(`⚡ Columns: A=Advertiser, B=URL, C=App Link, D=App Name, E=Video ID`);
-    console.log(`🔄 Reading from BOTTOM to TOP\n`);
+    console.log(`🔄 Direction: BOTTOM → TOP`);
+    console.log(`${'═'.repeat(70)}\n`);
 
-    const sessionStartTime = Date.now();
+    progressStats.startTime = Date.now();
     const MAX_RUNTIME = 330 * 60 * 1000;
 
     const sheets = await getGoogleSheetsClient();
@@ -694,27 +755,34 @@ async function extractWithRetry(item, browser) {
         process.exit(0);
     }
 
+    progressStats.totalRows = toProcess.length;
     const needsMeta = toProcess.filter(x => x.needsMetadata).length;
     const needsVideo = toProcess.filter(x => x.needsVideoId).length;
-    console.log(`📊 Found ${toProcess.length} rows to process (from bottom):`);
-    console.log(`   - ${needsMeta} need metadata`);
-    console.log(`   - ${needsVideo} need video ID\n`);
 
-    console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct');
+    console.log(`📊 Found ${toProcess.length.toLocaleString()} rows to process (from bottom):`);
+    console.log(`   - ${needsMeta.toLocaleString()} need metadata`);
+    console.log(`   - ${needsVideo.toLocaleString()} need video ID`);
+    console.log(`   - Concurrent pages: ${CONCURRENT_PAGES}`);
+    console.log(`   - Estimated batches: ${Math.ceil(toProcess.length / CONCURRENT_PAGES).toLocaleString()}\n`);
+
+    console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct (no proxy)');
 
     const PAGES_PER_BROWSER = 40;
     let currentIndex = 0;
+    let batchNumber = 0;
 
     while (currentIndex < toProcess.length) {
-        if (Date.now() - sessionStartTime > MAX_RUNTIME) {
-            console.log('\n⏰ Time limit reached. Stopping.');
+        if (Date.now() - progressStats.startTime > MAX_RUNTIME) {
+            console.log('\n⏰ Time limit reached (5h 30m). Stopping gracefully.');
+            logProgress('Session ended due to time limit');
             process.exit(0);
         }
 
         const remainingCount = toProcess.length - currentIndex;
         const currentSessionSize = Math.min(PAGES_PER_BROWSER, remainingCount);
 
-        console.log(`\n🏢 Starting New Browser Session (Items ${currentIndex + 1} - ${currentIndex + currentSessionSize})`);
+        console.log(`\n🏢 BROWSER SESSION ${Math.floor(currentIndex / PAGES_PER_BROWSER) + 1} [REVERSE]`);
+        console.log(`   Processing items ${currentIndex + 1} - ${currentIndex + currentSessionSize}`);
 
         let launchArgs = [
             '--autoplay-policy=no-user-gesture-required',
@@ -732,7 +800,7 @@ async function extractWithRetry(item, browser) {
         const proxy = pickProxy();
         if (proxy) launchArgs.push(`--proxy-server=${proxy}`);
 
-        console.log(`  🌐 Browser (proxy: ${proxy || 'DIRECT'})`);
+        console.log(`   🌐 Proxy: ${proxy || 'DIRECT'}`);
 
         let browser;
         try {
@@ -742,12 +810,12 @@ async function extractWithRetry(item, browser) {
                 executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null
             });
         } catch (launchError) {
-            console.error(`  ❌ Failed to launch browser: ${launchError.message}`);
+            console.error(`   ❌ Browser launch failed: ${launchError.message}`);
             await sleep(5000);
             try {
                 browser = await puppeteer.launch({ headless: 'new', args: launchArgs });
             } catch (retryError) {
-                console.error(`  ❌ Failed to launch browser on retry. Exiting.`);
+                console.error(`   ❌ Browser retry failed. Exiting.`);
                 process.exit(1);
             }
         }
@@ -756,10 +824,12 @@ async function extractWithRetry(item, browser) {
         let blocked = false;
 
         while (sessionProcessed < currentSessionSize && !blocked) {
+            const batchStartTime = Date.now();
+            batchNumber++;
             const batchSize = Math.min(CONCURRENT_PAGES, currentSessionSize - sessionProcessed);
             const batch = toProcess.slice(currentIndex, currentIndex + batchSize);
 
-            console.log(`📦 Batch ${currentIndex + 1}-${currentIndex + batchSize} / ${toProcess.length} (REVERSE)`);
+            console.log(`\n📦 BATCH #${batchNumber} [REVERSE] | Items ${currentIndex + 1}-${currentIndex + batchSize} of ${toProcess.length.toLocaleString()}`);
 
             try {
                 const results = await Promise.all(batch.map(async (item) => {
@@ -773,29 +843,66 @@ async function extractWithRetry(item, browser) {
                     };
                 }));
 
+                // Count results
+                let batchSuccess = 0, batchFailed = 0, batchSkipped = 0;
                 results.forEach(r => {
-                    console.log(`  → Row ${r.rowIndex + 1}: Advertiser=${r.advertiserName} | Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | Video=${r.videoId}`);
+                    const hasData = (r.storeLink && r.storeLink !== 'NOT_FOUND' && r.storeLink !== 'SKIP') ||
+                        (r.appName && r.appName !== 'NOT_FOUND' && r.appName !== 'SKIP') ||
+                        (r.videoId && r.videoId !== 'NOT_FOUND' && r.videoId !== 'SKIP');
+                    const isSkip = r.storeLink === 'SKIP' && r.appName === 'SKIP' && r.videoId === 'SKIP';
+                    const isError = r.storeLink === 'ERROR' || r.appName === 'ERROR';
+
+                    if (isSkip) {
+                        batchSkipped++;
+                        progressStats.skipped++;
+                    } else if (isError || (!hasData)) {
+                        batchFailed++;
+                        progressStats.failed++;
+                    } else {
+                        batchSuccess++;
+                        progressStats.success++;
+                    }
+
+                    // Compact result log
+                    const status = isSkip ? '⏭️' : (isError ? '❌' : (hasData ? '✅' : '⚠️'));
+                    console.log(`   ${status} Row ${r.rowIndex + 1}: ${r.appName || 'N/A'} | ${r.storeLink?.substring(0, 35) || 'N/A'}...`);
                 });
 
                 if (results.some(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED')) {
-                    console.log('  🛑 Block detected. Closing browser and rotating...');
+                    console.log('   🛑 BLOCKED! Rotating browser...');
                     proxyStats.totalBlocks++;
                     proxyStats.perProxy[proxy || 'DIRECT'] = (proxyStats.perProxy[proxy || 'DIRECT'] || 0) + 1;
+                    progressStats.blocked++;
                     blocked = true;
                 } else {
                     await batchWriteToSheet(sheets, results);
                     currentIndex += batchSize;
                     sessionProcessed += batchSize;
+                    progressStats.processed += batchSize;
+
+                    // Track batch time for ETA calculation
+                    const batchTime = Date.now() - batchStartTime;
+                    progressStats.batchTimes.push(batchTime);
+                    if (progressStats.batchTimes.length > 20) progressStats.batchTimes.shift(); // Keep last 20
+
+                    console.log(`   ⏱️ Batch completed in ${formatDuration(batchTime)} | ✅${batchSuccess} ❌${batchFailed} ⏭️${batchSkipped}`);
                 }
             } catch (err) {
-                console.error(`  ❌ Batch error: ${err.message}`);
+                console.error(`   ❌ Batch error: ${err.message}`);
+                progressStats.failed += batchSize;
                 currentIndex += batchSize;
                 sessionProcessed += batchSize;
+                progressStats.processed += batchSize;
+            }
+
+            // Show progress every 5 batches
+            if (batchNumber % 5 === 0) {
+                logProgress();
             }
 
             if (!blocked) {
                 const batchDelay = BATCH_DELAY_MIN + Math.random() * (BATCH_DELAY_MAX - BATCH_DELAY_MIN);
-                console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s...`);
+                console.log(`   ⏳ Cooling down ${Math.round(batchDelay / 1000)}s...`);
                 await sleep(batchDelay);
             }
         }
@@ -807,17 +914,25 @@ async function extractWithRetry(item, browser) {
 
         if (blocked) {
             const wait = PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN);
-            console.log(`  ⏳ Block wait: ${Math.round(wait / 1000)}s...`);
+            console.log(`   ⏳ Block cooldown: ${Math.round(wait / 1000)}s...`);
             await sleep(wait);
         }
     }
 
+    // Final progress report
+    logProgress('Session completed!');
+
     const remaining = await getUrlData(sheets);
     if (remaining.length > 0) {
-        console.log(`📈 ${remaining.length} rows remaining for next scheduled run.`);
+        console.log(`📈 ${remaining.length.toLocaleString()} rows remaining for next scheduled run.`);
     }
 
+    console.log('\n📊 FINAL STATISTICS [REVERSE]:');
+    console.log(`   Total processed: ${progressStats.processed.toLocaleString()}`);
+    console.log(`   Success: ${progressStats.success} | Failed: ${progressStats.failed} | Skipped: ${progressStats.skipped}`);
+    console.log(`   Blocks encountered: ${progressStats.blocked}`);
+    console.log(`   Total runtime: ${formatDuration(Date.now() - progressStats.startTime)}`);
     console.log('🔍 Proxy stats:', JSON.stringify(proxyStats));
-    console.log('\n🏁 Complete (REVERSE MODE).');
+    console.log('\n🏁 COMPLETE [REVERSE MODE].');
     process.exit(0);
 })();
