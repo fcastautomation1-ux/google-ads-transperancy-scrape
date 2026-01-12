@@ -14,32 +14,68 @@ on:
   repository_dispatch:
     types: [sheet_update]
   
+  # Backup schedule: Run 4 times a day (every 6 hours) if auto-restart fails
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours: 12:00 AM, 6:00 AM, 12:00 PM, 6:00 PM UTC
+  
   # Note: Workflow auto-restarts itself after 5 minutes (see last step for 24/7 continuous operation)
+
+concurrency:
+  group: unified-agent-continuous
+  cancel-in-progress: false  # Don't cancel if already running
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 360  # 6 hours max runtime
+    permissions:
+      contents: read
+      actions: write  # Required to trigger workflow dispatch
     
     steps:
+      - name: Check if workflow already running (backup schedule check)
+        if: github.event_name == 'schedule'
+        id: check_running
+        run: |
+          echo "🔍 Checking if workflow is already running..."
+          RUNNING=$(curl -s \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/unified-agent.yml/runs?status=in_progress" | grep -o '"total_count":[0-9]*' | cut -d':' -f2)
+          
+          if [ "$RUNNING" != "0" ] && [ ! -z "$RUNNING" ]; then
+            echo "✅ Workflow is already running ($RUNNING active runs). Skipping scheduled run."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "🔄 No active runs found. Proceeding with scheduled backup run."
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
       - name: Checkout repository
+        if: github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true'
         uses: actions/checkout@v4
       
       - name: Setup Node.js
+        if: github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'npm'
       
       - name: Install system dependencies for Puppeteer
+        if: github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgbm1 libasound2t64 libnss3 libxss1 libatk-bridge2.0-0 libgtk-3-0 libxshmfence1
       
       - name: Install dependencies
+        if: github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true'
         run: npm ci
       
       - name: Create credentials file
+        if: github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true'
         run: |
           cat > credentials.json << EOF
           ${{ secrets.GOOGLE_CREDENTIALS }}
@@ -47,6 +83,7 @@ jobs:
         shell: bash
       
       - name: Run Unified Agent
+        if: github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true'
         env:
           SHEET_NAME: ${{ inputs.sheet_name || secrets.SHEET_NAME || 'Test data' }}
           SHEET_BATCH_SIZE: ${{ secrets.SHEET_BATCH_SIZE || '1000' }}
@@ -63,11 +100,11 @@ jobs:
         run: node "unified_agent copy.js"
       
       - name: Cleanup credentials
-        if: always()
+        if: always() && (github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true')
         run: rm -f credentials.json
       
       - name: Upload logs on failure
-        if: failure()
+        if: failure() && (github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true')
         uses: actions/upload-artifact@v4
         with:
           name: error-logs
@@ -77,15 +114,43 @@ jobs:
           retention-days: 7
       
       - name: Wait 5 minutes then restart workflow (24/7 continuous)
-        if: always()
+        if: always() && (github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true')
         run: |
           echo "⏳ Waiting 5 minutes before restarting workflow..."
           sleep 300
           echo "🔄 Triggering workflow restart..."
-          curl -X POST \
+          
+          # Get workflow ID
+          WORKFLOW_RESPONSE=$(curl -s \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/${{ github.repository }}/actions/workflows/unified-agent.yml/dispatches \
-            -d '{"ref":"${{ github.ref }}"}'
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/unified-agent.yml")
+          
+          WORKFLOW_ID=$(echo "$WORKFLOW_RESPONSE" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2)
+          
+          if [ -z "$WORKFLOW_ID" ]; then
+            echo "❌ Failed to get workflow ID. Response: $WORKFLOW_RESPONSE"
+            exit 1
+          fi
+          
+          echo "📋 Workflow ID: $WORKFLOW_ID"
+          
+          # Trigger workflow dispatch
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$WORKFLOW_ID/dispatches" \
+            -d "{\"ref\":\"${{ github.ref }}\"}")
+          
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          if [ "$HTTP_CODE" = "204" ]; then
+            echo "✅ Workflow restart triggered successfully (HTTP $HTTP_CODE)"
+          else
+            echo "❌ Failed to trigger workflow restart (HTTP $HTTP_CODE)"
+            echo "Response: $BODY"
+            exit 1
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
