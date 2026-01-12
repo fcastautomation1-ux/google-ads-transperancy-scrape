@@ -101,14 +101,14 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
         try {
             const endRow = startRow + batchSize - 1;
             const range = `${SHEET_NAME}!A${startRow + 1}:E${endRow + 1}`; // +1 because Google Sheets is 1-indexed
-            
+
             const response = await sheets.spreadsheets.values.get({
                 spreadsheetId: SPREADSHEET_ID,
                 range: range,
             });
-            
+
             const rows = response.data.values || [];
-            
+
             if (rows.length === 0) {
                 hasMoreData = false;
                 break;
@@ -263,47 +263,47 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
     await page.evaluateOnNewDocument((screenW, screenH) => {
         // Remove webdriver flag
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        
+
         // Chrome runtime
         window.chrome = { runtime: {} };
-        
+
         // Plugins
-        Object.defineProperty(navigator, 'plugins', { 
+        Object.defineProperty(navigator, 'plugins', {
             get: () => [1, 2, 3, 4, 5],
             configurable: true
         });
-        
+
         // Languages
-        Object.defineProperty(navigator, 'languages', { 
+        Object.defineProperty(navigator, 'languages', {
             get: () => ['en-US', 'en'],
             configurable: true
         });
-        
+
         // Platform
         Object.defineProperty(navigator, 'platform', {
-            get: () => /Win/.test(navigator.userAgent) ? 'Win32' : 
-                       /Mac/.test(navigator.userAgent) ? 'MacIntel' : 'Linux x86_64',
+            get: () => /Win/.test(navigator.userAgent) ? 'Win32' :
+                /Mac/.test(navigator.userAgent) ? 'MacIntel' : 'Linux x86_64',
             configurable: true
         });
-        
+
         // Hardware concurrency (randomize CPU cores)
         Object.defineProperty(navigator, 'hardwareConcurrency', {
             get: () => 4 + Math.floor(Math.random() * 4), // 4-8 cores
             configurable: true
         });
-        
+
         // Device memory (randomize RAM)
         Object.defineProperty(navigator, 'deviceMemory', {
             get: () => [4, 8, 16][Math.floor(Math.random() * 3)],
             configurable: true
         });
-        
+
         // Screen properties
         Object.defineProperty(screen, 'width', { get: () => screenW, configurable: true });
         Object.defineProperty(screen, 'height', { get: () => screenH, configurable: true });
         Object.defineProperty(screen, 'availWidth', { get: () => screenW, configurable: true });
         Object.defineProperty(screen, 'availHeight', { get: () => screenH - 40, configurable: true });
-        
+
         // Permissions
         const originalQuery = window.navigator.permissions.query;
         window.navigator.permissions.query = (parameters) => (
@@ -311,10 +311,10 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                 Promise.resolve({ state: Notification.permission }) :
                 originalQuery(parameters)
         );
-        
+
         // Canvas fingerprint protection (add noise)
         const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
-        HTMLCanvasElement.prototype.toDataURL = function() {
+        HTMLCanvasElement.prototype.toDataURL = function () {
             const context = this.getContext('2d');
             if (context) {
                 const imageData = context.getImageData(0, 0, this.width, this.height);
@@ -392,7 +392,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             'en-GB,en;q=0.9',
             'en-US,en;q=0.9,es;q=0.8'
         ];
-        await page.setExtraHTTPHeaders({ 
+        await page.setExtraHTTPHeaders({
             'accept-language': acceptLanguages[Math.floor(Math.random() * acceptLanguages.length)],
             'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'accept-encoding': 'gzip, deflate, br',
@@ -486,11 +486,11 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             // Check for video elements
             const videoEl = document.querySelector('video');
             if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return false;
-            
+
             // Check page text for video indicators
             const bodyText = document.body.innerText.toLowerCase();
             if (bodyText.includes('format: video') || bodyText.includes('video ad')) return false;
-            
+
             // Check for video-related iframes/embeds
             const iframes = document.querySelectorAll('iframe');
             for (const iframe of iframes) {
@@ -499,11 +499,11 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     return false;
                 }
             }
-            
+
             // Check for play buttons
             const playButtons = document.querySelectorAll('[aria-label*="play" i], .play-button, .ytp-play-button, .ytp-large-play-button');
             if (playButtons.length > 0) return false;
-            
+
             // If none of the above, it's a text ad
             return true;
         });
@@ -511,11 +511,11 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         if (isTextAd) {
             console.log(`  📝 Text Ad detected - skipping (saving time)`);
             await page.close();
-            return { 
-                advertiserName: 'SKIP', 
-                appName: 'SKIP', 
-                storeLink: 'SKIP', 
-                videoId: 'SKIP' 
+            return {
+                advertiserName: 'SKIP',
+                appName: 'SKIP',
+                storeLink: 'SKIP',
+                videoId: 'SKIP'
             };
         }
 
@@ -524,11 +524,11 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         if (existingStoreLink && existingStoreLink.includes('apps.apple.com')) {
             console.log(`  🍏 Apple Store ad detected - skipping (only processing Play Store)`);
             await page.close();
-            return { 
-                advertiserName: 'SKIP', 
-                appName: 'SKIP', 
-                storeLink: 'SKIP', 
-                videoId: 'SKIP' 
+            return {
+                advertiserName: 'SKIP',
+                appName: 'SKIP',
+                storeLink: 'SKIP',
+                videoId: 'SKIP'
             };
         }
 
@@ -851,45 +851,45 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             if (playButtonInfo.found) {
                 try {
                     const client = await page.target().createCDPSession();
-                    
+
                     // More human-like mouse movement: gradual approach to button
                     const startX = Math.random() * viewport.width;
                     const startY = Math.random() * viewport.height;
                     const steps = 3 + Math.floor(Math.random() * 3); // 3-5 steps
-                    
+
                     for (let i = 0; i <= steps; i++) {
                         const progress = i / steps;
                         const currentX = startX + (playButtonInfo.x - startX) * progress;
                         const currentY = startY + (playButtonInfo.y - startY) * progress;
-                        await client.send('Input.dispatchMouseEvent', { 
-                            type: 'mouseMoved', 
-                            x: currentX, 
-                            y: currentY 
+                        await client.send('Input.dispatchMouseEvent', {
+                            type: 'mouseMoved',
+                            x: currentX,
+                            y: currentY
                         });
                         await sleep(50 + Math.random() * 50); // Variable speed
                     }
-                    
+
                     // Hover briefly before clicking (more human-like)
                     await sleep(150 + Math.random() * 100);
-                    
+
                     // Click with slight randomness in position
                     const clickX = playButtonInfo.x + (Math.random() - 0.5) * 5;
                     const clickY = playButtonInfo.y + (Math.random() - 0.5) * 5;
-                    
-                    await client.send('Input.dispatchMouseEvent', { 
-                        type: 'mousePressed', 
-                        x: clickX, 
-                        y: clickY, 
-                        button: 'left', 
-                        clickCount: 1 
+
+                    await client.send('Input.dispatchMouseEvent', {
+                        type: 'mousePressed',
+                        x: clickX,
+                        y: clickY,
+                        button: 'left',
+                        clickCount: 1
                     });
                     await sleep(80 + Math.random() * 40);
-                    await client.send('Input.dispatchMouseEvent', { 
-                        type: 'mouseReleased', 
-                        x: clickX, 
-                        y: clickY, 
-                        button: 'left', 
-                        clickCount: 1 
+                    await client.send('Input.dispatchMouseEvent', {
+                        type: 'mouseReleased',
+                        x: clickX,
+                        y: clickY,
+                        button: 'left',
+                        clickCount: 1
                     });
 
                     // Wait for video to load (poll for capturedVideoId)
@@ -1004,7 +1004,7 @@ async function extractWithRetry(item, browser) {
 
     console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct');
 
-        const PAGES_PER_BROWSER = 30; // Balanced: faster but safe
+    const PAGES_PER_BROWSER = 30; // Balanced: faster but safe
     let currentIndex = 0;
 
     while (currentIndex < toProcess.length) {
