@@ -85,7 +85,7 @@ jobs:
         env:
           SHEET_NAME: ${{ secrets.SHEET_NAME || 'Sheet1' }}
           SHEET_BATCH_SIZE: ${{ secrets.SHEET_BATCH_SIZE || '10000' }}
-          CONCURRENT_PAGES: ${{ secrets.CONCURRENT_PAGES || '5' }}
+          CONCURRENT_PAGES: ${{ secrets.CONCURRENT_PAGES || '2' }}
           BATCH_DELAY_MIN: ${{ secrets.BATCH_DELAY_MIN || '5000' }}
           BATCH_DELAY_MAX: ${{ secrets.BATCH_DELAY_MAX || '10000' }}
           PAGE_LOAD_DELAY_MIN: ${{ secrets.PAGE_LOAD_DELAY_MIN || '1000' }}
