@@ -23,16 +23,19 @@ const fs = require('fs');
 // CONFIGURATION
 // ============================================
 const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
-const SHEET_NAME = 'Sheet1';
+const SHEET_NAME = process.env.SHEET_NAME || 'Sheet1'; // Default back to Sheet1 but flexible
 const CREDENTIALS_PATH = './credentials.json';
-const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 8; // Increased for speed
+const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 1000; // Rows to load per batch
+const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Balanced: faster but safe
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 4;
-const POST_CLICK_WAIT = 6000; // Reduced from 8s
-const RETRY_WAIT_MULTIPLIER = 1.25; // Smoother retry scaling
+const POST_CLICK_WAIT = 6000;
+const RETRY_WAIT_MULTIPLIER = 1.25;
+const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 1000; // Faster staggered starts
+const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 3000;
 
-const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 3000; // Faster batches
-const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 6000; // Faster batches
+const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 5000; // Balanced: faster but safe
+const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 10000; // Balanced: faster but safe
 
 const PROXIES = process.env.PROXIES ? process.env.PROXIES.split(';').map(p => p.trim()).filter(Boolean) : [];
 const MAX_PROXY_ATTEMPTS = parseInt(process.env.MAX_PROXY_ATTEMPTS) || Math.max(3, PROXIES.length);
@@ -49,10 +52,14 @@ const proxyStats = { totalBlocks: 0, perProxy: {} };
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
 ];
 
 const VIEWPORTS = [
@@ -60,7 +67,10 @@ const VIEWPORTS = [
     { width: 1366, height: 768 },
     { width: 1536, height: 864 },
     { width: 1440, height: 900 },
-    { width: 1280, height: 720 }
+    { width: 1280, height: 720 },
+    { width: 1600, height: 900 },
+    { width: 1920, height: 1200 },
+    { width: 1680, height: 1050 }
 ];
 
 const randomDelay = (min, max) => new Promise(r => setTimeout(r, min + Math.random() * (max - min)));
@@ -79,40 +89,78 @@ async function getGoogleSheetsClient() {
     return google.sheets({ version: 'v4', auth: authClient });
 }
 
-async function getUrlData(sheets) {
-    const response = await sheets.spreadsheets.values.get({
-        spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A:E`,
-    });
-    const rows = response.data.values || [];
+async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
     const toProcess = [];
+    let startRow = 1; // Start from row 2 (skip header)
+    let hasMoreData = true;
+    let totalProcessed = 0;
 
-    for (let i = 1; i < rows.length; i++) {
-        const row = rows[i];
-        const url = row[1]?.trim() || '';
-        const storeLink = row[2]?.trim() || '';
-        const appName = row[3]?.trim() || '';
-        const videoId = row[4]?.trim() || '';
+    console.log(`📊 Loading data in batches of ${batchSize} rows...`);
 
-        if (!url) continue;
+    while (hasMoreData) {
+        try {
+            const endRow = startRow + batchSize - 1;
+            const range = `${SHEET_NAME}!A${startRow + 1}:E${endRow + 1}`; // +1 because Google Sheets is 1-indexed
 
-        const needsMetadata = !storeLink || !appName;
-        const hasValidStoreLink = storeLink &&
-            storeLink !== 'NOT_FOUND' &&
-            (storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com'));
-        const needsVideoId = hasValidStoreLink && !videoId;
-
-        if (needsMetadata || needsVideoId) {
-            toProcess.push({
-                url,
-                rowIndex: i,
-                needsMetadata,
-                needsVideoId,
-                existingStoreLink: storeLink
+            const response = await sheets.spreadsheets.values.get({
+                spreadsheetId: SPREADSHEET_ID,
+                range: range,
             });
+
+            const rows = response.data.values || [];
+
+            if (rows.length === 0) {
+                hasMoreData = false;
+                break;
+            }
+
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                const actualRowIndex = startRow + i; // Actual row number in sheet
+                const url = row[1]?.trim() || '';
+                const storeLink = row[2]?.trim() || '';
+                const appName = row[3]?.trim() || '';
+                const videoId = row[4]?.trim() || '';
+
+                if (!url) continue;
+
+                const needsMetadata = !storeLink || !appName;
+                const hasValidStoreLink = storeLink &&
+                    storeLink !== 'NOT_FOUND' &&
+                    (storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com'));
+                const needsVideoId = hasValidStoreLink && !videoId;
+
+                if (needsMetadata || needsVideoId) {
+                    toProcess.push({
+                        url,
+                        rowIndex: actualRowIndex,
+                        needsMetadata,
+                        needsVideoId,
+                        existingStoreLink: storeLink
+                    });
+                }
+            }
+
+            totalProcessed += rows.length;
+            console.log(`  ✓ Processed ${totalProcessed} rows, found ${toProcess.length} to process`);
+
+            // If we got less than batchSize rows, we've reached the end
+            if (rows.length < batchSize) {
+                hasMoreData = false;
+            } else {
+                startRow = endRow + 1;
+                // Small delay between batches to avoid rate limits
+                await sleep(100);
+            }
+        } catch (error) {
+            console.error(`  ⚠️ Error loading batch starting at row ${startRow}: ${error.message}`);
+            // If error, try to continue with next batch
+            startRow += batchSize;
+            await sleep(500); // Wait a bit longer on error
         }
     }
 
+    console.log(`📊 Total: ${totalProcessed} rows scanned, ${toProcess.length} need processing\n`);
     return toProcess;
 }
 
@@ -201,19 +249,83 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         return cleaned || 'NOT_FOUND';
     };
 
-    // ANTI-DETECTION from app_data_agent.js
+    // ENHANCED ANTI-DETECTION - More comprehensive fingerprint masking
     const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
     await page.setUserAgent(userAgent);
 
     const viewport = VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
     await page.setViewport(viewport);
 
-    await page.evaluateOnNewDocument(() => {
+    // Random screen properties for more realistic fingerprint
+    const screenWidth = viewport.width + Math.floor(Math.random() * 100) - 50;
+    const screenHeight = viewport.height + Math.floor(Math.random() * 100) - 50;
+
+    await page.evaluateOnNewDocument((screenW, screenH) => {
+        // Remove webdriver flag
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+        // Chrome runtime
         window.chrome = { runtime: {} };
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-    });
+
+        // Plugins
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => [1, 2, 3, 4, 5],
+            configurable: true
+        });
+
+        // Languages
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US', 'en'],
+            configurable: true
+        });
+
+        // Platform
+        Object.defineProperty(navigator, 'platform', {
+            get: () => /Win/.test(navigator.userAgent) ? 'Win32' :
+                /Mac/.test(navigator.userAgent) ? 'MacIntel' : 'Linux x86_64',
+            configurable: true
+        });
+
+        // Hardware concurrency (randomize CPU cores)
+        Object.defineProperty(navigator, 'hardwareConcurrency', {
+            get: () => 4 + Math.floor(Math.random() * 4), // 4-8 cores
+            configurable: true
+        });
+
+        // Device memory (randomize RAM)
+        Object.defineProperty(navigator, 'deviceMemory', {
+            get: () => [4, 8, 16][Math.floor(Math.random() * 3)],
+            configurable: true
+        });
+
+        // Screen properties
+        Object.defineProperty(screen, 'width', { get: () => screenW, configurable: true });
+        Object.defineProperty(screen, 'height', { get: () => screenH, configurable: true });
+        Object.defineProperty(screen, 'availWidth', { get: () => screenW, configurable: true });
+        Object.defineProperty(screen, 'availHeight', { get: () => screenH - 40, configurable: true });
+
+        // Permissions
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) => (
+            parameters.name === 'notifications' ?
+                Promise.resolve({ state: Notification.permission }) :
+                originalQuery(parameters)
+        );
+
+        // Canvas fingerprint protection (add noise)
+        const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL = function () {
+            const context = this.getContext('2d');
+            if (context) {
+                const imageData = context.getImageData(0, 0, this.width, this.height);
+                for (let i = 0; i < imageData.data.length; i += 4) {
+                    imageData.data[i] += Math.random() * 0.01 - 0.005; // Tiny noise
+                }
+                context.putImageData(imageData, 0, 0);
+            }
+            return originalToDataURL.apply(this, arguments);
+        };
+    }, screenWidth, screenHeight);
 
     // VIDEO ID CAPTURE + SPEED OPTIMIZATION
     await page.setRequestInterception(true);
@@ -262,7 +374,37 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
     try {
         console.log(`  🚀 Loading (${viewport.width}x${viewport.height}): ${url.substring(0, 50)}...`);
 
-        await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
+        // Random mouse movement before page load (more human-like)
+        try {
+            const client = await page.target().createCDPSession();
+            await client.send('Input.dispatchMouseEvent', {
+                type: 'mouseMoved',
+                x: Math.random() * viewport.width,
+                y: Math.random() * viewport.height
+            });
+        } catch (e) { /* Ignore if CDP not ready */ }
+
+        // Enhanced headers with randomization
+        const acceptLanguages = [
+            'en-US,en;q=0.9',
+            'en-US,en;q=0.9,zh-CN;q=0.8',
+            'en-US,en;q=0.9,fr;q=0.8',
+            'en-GB,en;q=0.9',
+            'en-US,en;q=0.9,es;q=0.8'
+        ];
+        await page.setExtraHTTPHeaders({
+            'accept-language': acceptLanguages[Math.floor(Math.random() * acceptLanguages.length)],
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'accept-encoding': 'gzip, deflate, br',
+            'sec-ch-ua': `"Not_A Brand";v="8", "Chromium";v="${120 + Math.floor(Math.random() * 2)}", "Google Chrome";v="${120 + Math.floor(Math.random() * 2)}"`,
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': `"${/Win/.test(userAgent) ? 'Windows' : /Mac/.test(userAgent) ? 'macOS' : 'Linux'}"`,
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'none',
+            'sec-fetch-user': '?1',
+            'upgrade-insecure-requests': '1'
+        });
 
         // Increased wait strategy for accuracy - iframes need time to render content
         const response = await page.goto(url, { waitUntil: 'networkidle2', timeout: MAX_WAIT_TIME });
@@ -279,25 +421,147 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED', videoId: 'BLOCKED' };
         }
 
-        // Wait for dynamic elements to settle (reduced for speed)
-        const baseWait = 2500 + Math.random() * 2000;
+        // Wait for dynamic elements to settle (increased for large datasets)
+        const baseWait = 4000 + Math.random() * 2000; // Increased: 4000-6000ms for better iframe loading
         const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
         await sleep(baseWait * attemptMultiplier);
 
-        // Faster interaction
-        await page.evaluate(async () => {
-            window.scrollBy(0, 200);
-            await new Promise(r => setTimeout(r, 200));
-            window.scrollBy(0, -100);
+        // Additional wait specifically for iframes to render (critical for Play Store links in large datasets)
+        try {
+            await page.evaluate(async () => {
+                const iframes = document.querySelectorAll('iframe');
+                if (iframes.length > 0) {
+                    await new Promise(resolve => {
+                        let loaded = 0;
+                        const totalIframes = iframes.length;
+                        const checkLoaded = () => {
+                            loaded++;
+                            if (loaded >= totalIframes) {
+                                setTimeout(resolve, 1500); // Extra time after all iframes load
+                            }
+                        };
+                        iframes.forEach(iframe => {
+                            try {
+                                if (iframe.contentDocument && iframe.contentDocument.readyState === 'complete') {
+                                    checkLoaded();
+                                } else {
+                                    iframe.onload = checkLoaded;
+                                    // Timeout after 4 seconds per iframe
+                                    setTimeout(checkLoaded, 4000);
+                                }
+                            } catch (e) {
+                                // Cross-origin iframe, count as loaded
+                                checkLoaded();
+                            }
+                        });
+                        // If no iframes, resolve immediately
+                        if (totalIframes === 0) resolve();
+                    });
+                }
+            });
+        } catch (e) {
+            // If iframe check fails, wait a bit anyway
+            await sleep(1000);
+        }
+
+        // Random mouse movements for more human-like behavior
+        try {
+            const client = await page.target().createCDPSession();
+            const movements = 2 + Math.floor(Math.random() * 3); // 2-4 movements
+            for (let i = 0; i < movements; i++) {
+                await client.send('Input.dispatchMouseEvent', {
+                    type: 'mouseMoved',
+                    x: Math.random() * viewport.width,
+                    y: Math.random() * viewport.height
+                });
+                await sleep(200 + Math.random() * 300);
+            }
+        } catch (e) { /* Ignore if CDP fails */ }
+
+        // =====================================================
+        // EARLY TEXT AD DETECTION - Skip text ads entirely
+        // Only process video ads for Play Store links
+        // =====================================================
+        const isTextAd = await page.evaluate(() => {
+            // Check for video elements
+            const videoEl = document.querySelector('video');
+            if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return false;
+
+            // Check page text for video indicators
+            const bodyText = document.body.innerText.toLowerCase();
+            if (bodyText.includes('format: video') || bodyText.includes('video ad')) return false;
+
+            // Check for video-related iframes/embeds
+            const iframes = document.querySelectorAll('iframe');
+            for (const iframe of iframes) {
+                const src = iframe.src || '';
+                if (src.includes('youtube.com') || src.includes('googlevideo.com') || src.includes('video')) {
+                    return false;
+                }
+            }
+
+            // Check for play buttons
+            const playButtons = document.querySelectorAll('[aria-label*="play" i], .play-button, .ytp-play-button, .ytp-large-play-button');
+            if (playButtons.length > 0) return false;
+
+            // If none of the above, it's a text ad
+            return true;
         });
+
+        if (isTextAd) {
+            console.log(`  📝 Text Ad detected - skipping (saving time)`);
+            await page.close();
+            return {
+                advertiserName: 'SKIP',
+                appName: 'SKIP',
+                storeLink: 'SKIP',
+                videoId: 'SKIP'
+            };
+        }
+
+        // Skip Apple Store ads early if we already have the store link
+        // Only process Play Store video ads
+        if (existingStoreLink && existingStoreLink.includes('apps.apple.com')) {
+            console.log(`  🍏 Apple Store ad detected - skipping (only processing Play Store)`);
+            await page.close();
+            return {
+                advertiserName: 'SKIP',
+                appName: 'SKIP',
+                storeLink: 'SKIP',
+                videoId: 'SKIP'
+            };
+        }
+
+        // Human-like interaction (optimized for speed while staying safe)
+        await page.evaluate(async () => {
+            // Quick but natural scrolling with random pauses
+            for (let i = 0; i < 3; i++) {
+                window.scrollBy(0, 150 + Math.random() * 100);
+                await new Promise(r => setTimeout(r, 200 + Math.random() * 150));
+                // Random pause sometimes (30% chance)
+                if (Math.random() < 0.3) {
+                    await new Promise(r => setTimeout(r, 300 + Math.random() * 200));
+                }
+            }
+            // Scroll back up a bit
+            window.scrollBy(0, -100);
+            await new Promise(r => setTimeout(r, 250));
+        });
+
+        // Random pause before extraction (10-30% chance, adds randomness)
+        if (Math.random() < 0.2) {
+            const randomPause = 500 + Math.random() * 1000;
+            await sleep(randomPause);
+        }
 
         // =====================================================
         // PHASE 1: METADATA EXTRACTION
         // =====================================================
+        let mainPageInfo = null;
         if (needsMetadata) {
             console.log(`  📊 Extracting metadata...`);
 
-            const mainPageInfo = await page.evaluate(() => {
+            mainPageInfo = await page.evaluate(() => {
                 const getSafeText = (sel) => {
                     const el = document.querySelector(sel);
                     if (!el) return null;
@@ -515,19 +779,19 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
         // =====================================================
         // PHASE 2: VIDEO ID EXTRACTION
-        // SPEED OPTIMIZED: Only extract from Play Store
-        // Apple apps are SKIPPED (no Google video IDs)
+        // Only extract for Play Store video ads
+        // Text ads and Apple Store ads already skipped earlier
         // =====================================================
         const finalStoreLink = result.storeLink !== 'SKIP' ? result.storeLink : existingStoreLink;
         const isPlayStore = finalStoreLink && finalStoreLink !== 'NOT_FOUND' && finalStoreLink.includes('play.google.com');
         const isAppleStore = finalStoreLink && finalStoreLink !== 'NOT_FOUND' && finalStoreLink.includes('apps.apple.com');
 
-        // SPEED: Apple ads skip video extraction instantly
+        // Skip Apple Store ads (shouldn't reach here if we had existing link, but check anyway)
         if (isAppleStore) {
             result.videoId = 'SKIP';
-            console.log(`  🍏 Apple App - skipping video (instant)`);
+            console.log(`  🍏 Apple App - skipping video`);
         }
-        // Only extract video ID for Play Store ads
+        // Only extract video ID for Play Store video ads
         else if (isPlayStore && (needsVideoId || needsMetadata)) {
             console.log(`  🎬 Extracting Video ID...`);
 
@@ -587,11 +851,46 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             if (playButtonInfo.found) {
                 try {
                     const client = await page.target().createCDPSession();
-                    await client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: playButtonInfo.x, y: playButtonInfo.y });
-                    await sleep(100);
-                    await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: playButtonInfo.x, y: playButtonInfo.y, button: 'left', clickCount: 1 });
-                    await sleep(80);
-                    await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: playButtonInfo.x, y: playButtonInfo.y, button: 'left', clickCount: 1 });
+
+                    // More human-like mouse movement: gradual approach to button
+                    const startX = Math.random() * viewport.width;
+                    const startY = Math.random() * viewport.height;
+                    const steps = 3 + Math.floor(Math.random() * 3); // 3-5 steps
+
+                    for (let i = 0; i <= steps; i++) {
+                        const progress = i / steps;
+                        const currentX = startX + (playButtonInfo.x - startX) * progress;
+                        const currentY = startY + (playButtonInfo.y - startY) * progress;
+                        await client.send('Input.dispatchMouseEvent', {
+                            type: 'mouseMoved',
+                            x: currentX,
+                            y: currentY
+                        });
+                        await sleep(50 + Math.random() * 50); // Variable speed
+                    }
+
+                    // Hover briefly before clicking (more human-like)
+                    await sleep(150 + Math.random() * 100);
+
+                    // Click with slight randomness in position
+                    const clickX = playButtonInfo.x + (Math.random() - 0.5) * 5;
+                    const clickY = playButtonInfo.y + (Math.random() - 0.5) * 5;
+
+                    await client.send('Input.dispatchMouseEvent', {
+                        type: 'mousePressed',
+                        x: clickX,
+                        y: clickY,
+                        button: 'left',
+                        clickCount: 1
+                    });
+                    await sleep(80 + Math.random() * 40);
+                    await client.send('Input.dispatchMouseEvent', {
+                        type: 'mouseReleased',
+                        x: clickX,
+                        y: clickY,
+                        button: 'left',
+                        clickCount: 1
+                    });
 
                     // Wait for video to load (poll for capturedVideoId)
                     const waitTime = POST_CLICK_WAIT * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
@@ -641,6 +940,11 @@ async function extractWithRetry(item, browser) {
 
         if (data.storeLink === 'BLOCKED' || data.appName === 'BLOCKED') return data;
 
+        // If all fields are SKIP (text ad or Apple Store ad), return immediately - no retries needed
+        if (data.storeLink === 'SKIP' && data.appName === 'SKIP' && data.videoId === 'SKIP') {
+            return data;
+        }
+
         // Determine if we have a valid store link (either from before or just found)
         const currentStoreLink = (data.storeLink && data.storeLink !== 'SKIP' && data.storeLink !== 'NOT_FOUND')
             ? data.storeLink
@@ -655,9 +959,10 @@ async function extractWithRetry(item, browser) {
 
         // 2. Video ID success (SPEED OPTIMIZED):
         // - Apple Store: always success (SKIP is fine, no retries needed)
-        // - Play Store: need actual video ID (NOT_FOUND = retry)
-        // - Text ad: always success (no video expected)
-        const videoSuccess = isAppleStore || !isPlayStore || (data.videoId !== 'NOT_FOUND' && data.videoId !== null);
+        // - Text ad: always success (SKIP is fine, no retries needed)
+        // - Play Store video ads: need actual video ID (NOT_FOUND = retry, SKIP = success for text ads)
+        // - Non-Play Store: always success (no video expected)
+        const videoSuccess = isAppleStore || !isPlayStore || data.videoId === 'SKIP' || (data.videoId !== 'NOT_FOUND' && data.videoId !== null);
 
         // We only return if BOTH are successful
         if (metadataSuccess && videoSuccess) {
@@ -699,8 +1004,9 @@ async function extractWithRetry(item, browser) {
 
     console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct');
 
-    const PAGES_PER_BROWSER = 40;
+    const PAGES_PER_BROWSER = 30; // Balanced: faster but safe
     let currentIndex = 0;
+    let consecutiveSuccessBatches = 0; // Declared here to be visible in the loop
 
     while (currentIndex < toProcess.length) {
         if (Date.now() - sessionStartTime > MAX_RUNTIME) {
@@ -751,6 +1057,8 @@ async function extractWithRetry(item, browser) {
 
         let sessionProcessed = 0;
         let blocked = false;
+        // Reset adaptive counter for each browser session
+        consecutiveSuccessBatches = 0;
 
         while (sessionProcessed < currentSessionSize && !blocked) {
             const batchSize = Math.min(CONCURRENT_PAGES, currentSessionSize - sessionProcessed);
@@ -759,7 +1067,13 @@ async function extractWithRetry(item, browser) {
             console.log(`📦 Batch ${currentIndex + 1}-${currentIndex + batchSize} / ${toProcess.length}`);
 
             try {
-                const results = await Promise.all(batch.map(async (item) => {
+                // Stagger page loads to avoid blocks - add delay between each concurrent page
+                const results = await Promise.all(batch.map(async (item, index) => {
+                    // Add random delay before starting each page (staggered)
+                    if (index > 0) {
+                        const staggerDelay = PAGE_LOAD_DELAY_MIN + Math.random() * (PAGE_LOAD_DELAY_MAX - PAGE_LOAD_DELAY_MIN);
+                        await sleep(staggerDelay * index); // Each page waits progressively longer
+                    }
                     const data = await extractWithRetry(item, browser);
                     return {
                         rowIndex: item.rowIndex,
@@ -774,16 +1088,30 @@ async function extractWithRetry(item, browser) {
                     console.log(`  → Row ${r.rowIndex + 1}: Advertiser=${r.advertiserName} | Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | Video=${r.videoId}`);
                 });
 
-                if (results.some(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED')) {
-                    console.log('  🛑 Block detected. Closing browser and rotating...');
+                // Separate successful results from blocked ones
+                const successfulResults = results.filter(r => r.storeLink !== 'BLOCKED' && r.appName !== 'BLOCKED');
+                const blockedResults = results.filter(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED');
+
+                // Always write successful results to sheet (even if some were blocked)
+                if (successfulResults.length > 0) {
+                    await batchWriteToSheet(sheets, successfulResults);
+                    console.log(`  ✅ Wrote ${successfulResults.length} successful results to sheet`);
+                }
+
+                // If any results were blocked, mark for browser rotation
+                if (blockedResults.length > 0) {
+                    console.log(`  🛑 Block detected (${blockedResults.length} blocked, ${successfulResults.length} successful). Closing browser and rotating...`);
                     proxyStats.totalBlocks++;
                     proxyStats.perProxy[proxy || 'DIRECT'] = (proxyStats.perProxy[proxy || 'DIRECT'] || 0) + 1;
                     blocked = true;
+                    consecutiveSuccessBatches = 0; // Reset on block
                 } else {
-                    await batchWriteToSheet(sheets, results);
-                    currentIndex += batchSize;
-                    sessionProcessed += batchSize;
+                    consecutiveSuccessBatches++; // Track successful batches
                 }
+
+                // Update index for all processed items (both successful and blocked)
+                currentIndex += batchSize;
+                sessionProcessed += batchSize;
             } catch (err) {
                 console.error(`  ❌ Batch error: ${err.message}`);
                 currentIndex += batchSize;
@@ -791,8 +1119,12 @@ async function extractWithRetry(item, browser) {
             }
 
             if (!blocked) {
-                const batchDelay = BATCH_DELAY_MIN + Math.random() * (BATCH_DELAY_MAX - BATCH_DELAY_MIN);
-                console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s...`);
+                // Adaptive delay: reduce delay if we're having success (faster processing)
+                const adaptiveMultiplier = Math.max(0.7, 1 - (consecutiveSuccessBatches * 0.05)); // Reduce delay by 5% per successful batch, min 70%
+                const adjustedMin = BATCH_DELAY_MIN * adaptiveMultiplier;
+                const adjustedMax = BATCH_DELAY_MAX * adaptiveMultiplier;
+                const batchDelay = adjustedMin + Math.random() * (adjustedMax - adjustedMin);
+                console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s... (adaptive: ${Math.round(adaptiveMultiplier * 100)}%)`);
                 await sleep(batchDelay);
             }
         }
