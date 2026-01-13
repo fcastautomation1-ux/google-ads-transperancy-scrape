@@ -1064,9 +1064,8 @@ async function extractWithRetry(item, browser) {
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            '--no-zygote',
-            '--single-process',
-            '--disable-software-rasterizer',
+            '--ignore-certificate-errors',
+            '--disable-features=IsolateOrigins,site-per-process',
             '--no-first-run'
         ];
 
