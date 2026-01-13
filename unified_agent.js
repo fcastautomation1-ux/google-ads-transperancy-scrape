@@ -168,25 +168,24 @@ async function batchWriteToSheet(sheets, updates) {
     if (updates.length === 0) return;
 
     const data = [];
-    // Quote sheet name to handle potential spaces
     const quotedSheet = `'${SHEET_NAME}'`;
 
     updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId }) => {
         const rowNum = rowIndex + 1;
-        if (advertiserName && advertiserName !== 'SKIP') {
-            data.push({ range: `${quotedSheet}!A${rowNum}`, values: [[advertiserName]] });
-        }
-        if (storeLink && storeLink !== 'SKIP') {
-            data.push({ range: `${quotedSheet}!C${rowNum}`, values: [[storeLink]] });
-        }
-        if (appName && appName !== 'SKIP') {
-            data.push({ range: `${quotedSheet}!D${rowNum}`, values: [[appName]] });
-        }
-        if (videoId && videoId !== 'SKIP') {
-            data.push({ range: `${quotedSheet}!E${rowNum}`, values: [[videoId]] });
-        }
 
-        // Write Timestamp to Column M (Pakistan Time)
+        // Always write the result, even if it is SKIP or NOT_FOUND
+        // This overwrites any previous errors/formulas in the sheet
+        const finalAdvertiser = advertiserName || 'NOT_FOUND';
+        const finalStoreLink = storeLink || 'NOT_FOUND';
+        const finalAppName = appName || 'NOT_FOUND';
+        const finalVideoId = videoId || 'NOT_FOUND';
+
+        data.push({ range: `${quotedSheet}!A${rowNum}`, values: [[finalAdvertiser]] });
+        data.push({ range: `${quotedSheet}!C${rowNum}`, values: [[finalStoreLink]] });
+        data.push({ range: `${quotedSheet}!D${rowNum}`, values: [[finalAppName]] });
+        data.push({ range: `${quotedSheet}!E${rowNum}`, values: [[finalVideoId]] });
+
+        // Write Timestamp to Column M
         const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
         data.push({ range: `${quotedSheet}!M${rowNum}`, values: [[timestamp]] });
     });
@@ -521,42 +520,19 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         // EARLY TEXT AD DETECTION - Skip text ads entirely
         // Only process video ads for Play Store links
         // =====================================================
+        /* 
+        // DISABLED: Text Ad Detection was causing false positives
         const isTextAd = await page.evaluate(() => {
-            // Check for video elements
-            const videoEl = document.querySelector('video');
-            if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return false;
-
-            // Check page text for video indicators
-            const bodyText = document.body.innerText.toLowerCase();
-            if (bodyText.includes('format: video') || bodyText.includes('video ad')) return false;
-
-            // Check for video-related iframes/embeds
-            const iframes = document.querySelectorAll('iframe');
-            for (const iframe of iframes) {
-                const src = iframe.src || '';
-                if (src.includes('youtube.com') || src.includes('googlevideo.com') || src.includes('video')) {
-                    return false;
-                }
-            }
-
-            // Check for play buttons
-            const playButtons = document.querySelectorAll('[aria-label*="play" i], .play-button, .ytp-play-button, .ytp-large-play-button');
-            if (playButtons.length > 0) return false;
-
-            // If none of the above, it's a text ad
-            return true;
+             // ... logic disabled ...
+             return false;
         });
 
         if (isTextAd) {
-            console.log(`  📝 Text Ad detected - skipping (saving time)`);
-            await page.close();
-            return {
-                advertiserName: 'SKIP',
-                appName: 'SKIP',
-                storeLink: 'SKIP',
-                videoId: 'SKIP'
-            };
-        }
+             console.log(`  📝 Text Ad detected - skipping (saving time)`);
+             await page.close();
+             return { advertiserName: 'SKIP', appName: 'SKIP', storeLink: 'SKIP', videoId: 'SKIP' };
+        } 
+        */
 
         // Skip Apple Store ads early if we already have the store link
         // Only process Play Store video ads
