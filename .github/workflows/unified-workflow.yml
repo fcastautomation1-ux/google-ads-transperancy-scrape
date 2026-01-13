@@ -83,9 +83,20 @@ jobs:
         id: run_script
         run: node unified_agent.js
         env:
+          SHEET_NAME: ${{ secrets.SHEET_NAME || 'Sheet1' }}
+          SHEET_BATCH_SIZE: ${{ secrets.SHEET_BATCH_SIZE || '1000' }}
+          CONCURRENT_PAGES: ${{ secrets.CONCURRENT_PAGES || '5' }}
+          BATCH_DELAY_MIN: ${{ secrets.BATCH_DELAY_MIN || '5000' }}
+          BATCH_DELAY_MAX: ${{ secrets.BATCH_DELAY_MAX || '10000' }}
+          PAGE_LOAD_DELAY_MIN: ${{ secrets.PAGE_LOAD_DELAY_MIN || '1000' }}
+          PAGE_LOAD_DELAY_MAX: ${{ secrets.PAGE_LOAD_DELAY_MAX || '3000' }}
+          PROXIES: ${{ secrets.PROXIES }}
+          MAX_PROXY_ATTEMPTS: ${{ secrets.MAX_PROXY_ATTEMPTS }}
+          PROXY_RETRY_DELAY_MIN: ${{ secrets.PROXY_RETRY_DELAY_MIN }}
+          PROXY_RETRY_DELAY_MAX: ${{ secrets.PROXY_RETRY_DELAY_MAX }}
+          PUPPETEER_EXECUTABLE_PATH: ${{ secrets.PUPPETEER_EXECUTABLE_PATH }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          CONCURRENT_PAGES: 2
 
       - name: Cleanup credentials
         if: always() && (github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true')
