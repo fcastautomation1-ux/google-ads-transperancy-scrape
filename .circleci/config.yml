@@ -6,16 +6,8 @@ version: 2.1
 orbs:
   node: circleci/node@5.1.0
 
-parameters:
-  sheet_name:
-    type: string
-    default: "Test data"
-  run_agent_bottom:
-    type: boolean
-    default: true
-  run_agent_copy_bottom:
-    type: boolean
-    default: true
+# Parameters removed - using environment variables instead
+# Set SHEET_NAME in CircleCI environment variables if you want to override 'Test data' for unified_agent_copy_bottom.js
 
 jobs:
   # Job for unified_agent_bottom.js (based on unified_agent.js)
@@ -67,9 +59,10 @@ jobs:
           command: |
             echo "🚀 Starting UNIFIED Google Ads Agent (BOTTOM TO TOP) at $(date)"
             echo "📊 System environment: $(uname -a)"
+            echo "📋 Sheet: Sheet1 (hardcoded)"
             node unified_agent_bottom.js
           environment:
-            SHEET_NAME: << pipeline.parameters.sheet_name >>
+            # Note: unified_agent_bottom.js uses hardcoded 'Sheet1', so SHEET_NAME is not used
             CONCURRENT_PAGES: ${CONCURRENT_PAGES:-8}
             BATCH_DELAY_MIN: ${BATCH_DELAY_MIN:-3000}
             BATCH_DELAY_MAX: ${BATCH_DELAY_MAX:-6000}
@@ -138,9 +131,11 @@ jobs:
           command: |
             echo "🚀 Starting UNIFIED Google Ads Agent Copy (BOTTOM TO TOP) at $(date)"
             echo "📊 System environment: $(uname -a)"
+            echo "📋 Sheet: ${SHEET_NAME:-Test data}"
             node unified_agent_copy_bottom.js
           environment:
-            SHEET_NAME: << pipeline.parameters.sheet_name >>
+            # unified_agent_copy_bottom.js uses SHEET_NAME env var, defaults to 'Test data'
+            SHEET_NAME: ${SHEET_NAME:-Test data}
             SHEET_BATCH_SIZE: ${SHEET_BATCH_SIZE:-1000}
             CONCURRENT_PAGES: ${CONCURRENT_PAGES:-5}
             BATCH_DELAY_MIN: ${BATCH_DELAY_MIN:-5000}
@@ -167,28 +162,14 @@ workflows:
   version: 2
   
   # Workflow to run both bottom-to-top agents
+  # - unified_agent_bottom.js uses 'Sheet1' (hardcoded)
+  # - unified_agent_copy_bottom.js uses 'Test data' (or SHEET_NAME env var)
   run-bottom-to-top-agents:
     jobs:
       - run-unified-agent-bottom:
           filters:
             branches:
               only: main
-      - run-unified-agent-copy-bottom:
-          filters:
-            branches:
-              only: main
-  
-  # Workflow to run only unified_agent_bottom.js
-  run-agent-bottom-only:
-    jobs:
-      - run-unified-agent-bottom:
-          filters:
-            branches:
-              only: main
-  
-  # Workflow to run only unified_agent_copy_bottom.js
-  run-agent-copy-bottom-only:
-    jobs:
       - run-unified-agent-copy-bottom:
           filters:
             branches:
