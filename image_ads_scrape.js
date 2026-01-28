@@ -29,14 +29,14 @@ const CREDENTIALS_PATH = './credentials.json';
 const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 1000; // Rows to load per batch
 const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Balanced: faster but safe
 const MAX_WAIT_TIME = 60000;
-const MAX_RETRIES = 4;
+const MAX_RETRIES = 2;  // Reduced from 4 to 2, increased wait time instead
 const POST_CLICK_WAIT = 6000;
-const RETRY_WAIT_MULTIPLIER = 1.25;
-const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 1000; // Faster staggered starts
-const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 3000;
+const RETRY_WAIT_MULTIPLIER = 1.5;  // Increased multiplier for longer waits
+const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 2000; // Increased from 1000
+const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 4000; // Increased from 3000
 
-const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 5000; // Balanced: faster but safe
-const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 10000; // Balanced: faster but safe
+const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 8000; // Increased from 5000
+const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 15000; // Increased from 10000
 
 const PROXIES = process.env.PROXIES ? process.env.PROXIES.split(';').map(p => p.trim()).filter(Boolean) : [];
 const MAX_PROXY_ATTEMPTS = parseInt(process.env.MAX_PROXY_ATTEMPTS) || Math.max(3, PROXIES.length);
@@ -49,6 +49,43 @@ function pickProxy() {
 }
 
 const proxyStats = { totalBlocks: 0, perProxy: {} };
+
+// ============================================
+// IMAGE AD VALIDATION - Check if ad matches expected structure
+// ============================================
+function isValidImageAdStructure(frameContent) {
+    try {
+        // Must have: image, title, and description
+        const hasImage = frameContent.querySelector('img.landscape-image, img#landscape-image, .landscape-image img');
+        const hasTitle = frameContent.querySelector('span.landscape-app-title, span#landscape-app-title, .landscape-app-title');
+        const hasDescription = frameContent.querySelector('div.landscape-app-text, div#landscape-app-text, .landscape-app-text');
+        
+        if (!hasImage) {
+            return false;
+        }
+        if (!hasTitle) {
+            return false;
+        }
+        if (!hasDescription) {
+            return false;
+        }
+        
+        // Validate that title and description have actual text
+        const titleText = (hasTitle.innerText || hasTitle.textContent || '').trim();
+        const descText = (hasDescription.innerText || hasDescription.textContent || '').trim();
+        
+        if (!titleText || titleText.length < 2) {
+            return false;
+        }
+        if (!descText || descText.length < 2) {
+            return false;
+        }
+        
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
 
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -536,18 +573,31 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             // Find all iframes that might contain the ad
             const frames = page.frames();
             let extractedData = null;
+            let validImageAdFound = false;
 
             for (const frame of frames) {
                 try {
-                    // Check if this frame has the landscape-image structure
-                    const hasAdContent = await frame.evaluate(() => {
+                    // Validate frame has ONLY the correct image ad structure (title + image + description)
+                    const isValidImageAd = await frame.evaluate(() => {
                         const img = document.querySelector('img.landscape-image, img#landscape-image, .landscape-image img');
-                        return img !== null;
+                        const title = document.querySelector('span.landscape-app-title, span#landscape-app-title, .landscape-app-title');
+                        const desc = document.querySelector('div.landscape-app-text, div#landscape-app-text, .landscape-app-text');
+                        
+                        if (!img || !title || !desc) return false;
+                        
+                        // Validate they have content
+                        const titleText = (title.innerText || title.textContent || '').trim();
+                        const descText = (desc.innerText || desc.textContent || '').trim();
+                        
+                        return titleText.length >= 2 && descText.length >= 2;
                     });
 
-                    if (!hasAdContent) continue;
+                    if (!isValidImageAd) {
+                        continue;  // Skip this frame - not a valid image ad
+                    }
 
-                    console.log(`  🔍 Found ad content in frame, attempting hover extraction...`);
+                    validImageAdFound = true;
+                    console.log(`  ✅ Found valid image ad structure, extracting...`);
 
                     // Get the image element handle for hover
                     const imgElement = await frame.$('img.landscape-image, img#landscape-image, .landscape-image img');
@@ -692,8 +742,18 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     result.appSubtitle = extractedData.appSubtitle;
                     console.log(`  ✓ App Subtitle (F): ${result.appSubtitle}`);
                 }
+            } else if (!validImageAdFound) {
+                console.log(`  ⏭️  Skipping: Not an image ad (no matching structure)`);
+                result = {
+                    advertiserName: 'SKIP',
+                    appName: 'SKIP',
+                    storeLink: 'SKIP',
+                    videoId: 'SKIP',
+                    appSubtitle: 'SKIP',
+                    imageUrl: 'SKIP'
+                };
             } else {
-                console.log(`  ⚠️ No image ad data found in any frame`);
+                console.log(`  ⚠️ No image ad data extracted`);
             }
 
             // Set video ID to SKIP for image ads (not applicable)
@@ -724,19 +784,24 @@ async function extractWithRetry(item, browser) {
 
         if (data.storeLink === 'BLOCKED' || data.appName === 'BLOCKED') return data;
 
+        // If explicitly skipped (not an image ad), return as-is
+        if (data.appName === 'SKIP' && data.imageUrl === 'SKIP') {
+            return data;
+        }
+
         // Success criteria for IMAGE ADS:
-        // We need at least one of: appName, imageUrl, or appSubtitle
-        const imageAdSuccess = (data.appName && data.appName !== 'NOT_FOUND' && data.appName !== 'SKIP') ||
-                               (data.imageUrl && data.imageUrl !== 'NOT_FOUND' && data.imageUrl !== 'SKIP') ||
+        // We need ALL three: appName, imageUrl, and appSubtitle
+        const imageAdSuccess = (data.appName && data.appName !== 'NOT_FOUND' && data.appName !== 'SKIP') &&
+                               (data.imageUrl && data.imageUrl !== 'NOT_FOUND' && data.imageUrl !== 'SKIP') &&
                                (data.appSubtitle && data.appSubtitle !== 'NOT_FOUND' && data.appSubtitle !== 'SKIP');
 
         if (imageAdSuccess) {
             return data;
-        } else {
-            console.log(`  ⚠️ Attempt ${attempt} - No data found. Retrying...`);
+        } else if (attempt === 1) {
+            console.log(`  ⚠️ Attempt 1 - Incomplete data. Retrying with longer wait...`);
         }
 
-        await randomDelay(2000, 4000);
+        await randomDelay(3000, 6000);
     }
     // If we're here, we exhausted retries. Return whatever we have.
     return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', videoId: 'NOT_FOUND', appSubtitle: 'NOT_FOUND', imageUrl: 'NOT_FOUND' };
