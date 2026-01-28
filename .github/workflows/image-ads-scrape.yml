@@ -1,0 +1,84 @@
+name: Image Ads Scraper
+
+on:
+  # Manual trigger with inputs
+  workflow_dispatch:
+    inputs:
+      sheet_name:
+        description: 'Google Sheet name to process'
+        required: false
+        default: 'Test'
+      concurrent_pages:
+        description: 'Number of concurrent pages'
+        required: false
+        default: '3'
+      batch_size:
+        description: 'Sheet batch size'
+        required: false
+        default: '1000'
+
+  # Scheduled runs (adjust cron as needed)
+  schedule:
+    - cron: '0 */6 * * *'  # Every 6 hours
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hour timeout
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install system dependencies for Puppeteer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libcups2 \
+            libdrm2 \
+            libxkbcommon0 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxfixes3 \
+            libxrandr2 \
+            libgbm1 \
+            libasound2 \
+            libpango-1.0-0 \
+            libcairo2 \
+            libatspi2.0-0
+
+      - name: Install npm dependencies
+        run: npm ci || npm install
+
+      - name: Create credentials file
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
+
+      - name: Run Image Ads Scraper
+        env:
+          SHEET_NAME: ${{ github.event.inputs.sheet_name || 'Test' }}
+          CONCURRENT_PAGES: ${{ github.event.inputs.concurrent_pages || '5' }}
+          SHEET_BATCH_SIZE: ${{ github.event.inputs.batch_size || '1000' }}
+          PAGE_LOAD_DELAY_MIN: '1000'
+          PAGE_LOAD_DELAY_MAX: '3000'
+          BATCH_DELAY_MIN: '5000'
+          BATCH_DELAY_MAX: '10000'
+          PROXIES: ${{ secrets.PROXIES }}
+          MAX_PROXY_ATTEMPTS: '3'
+          PROXY_RETRY_DELAY_MIN: '25000'
+          PROXY_RETRY_DELAY_MAX: '75000'
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: 'false'
+        run: node image_ads_scrape.js
+
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f credentials.json
