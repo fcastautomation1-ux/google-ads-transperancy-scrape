@@ -431,28 +431,37 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
         await sleep(baseWait * attemptMultiplier);
 
-        // Additional wait specifically for iframes to render (critical for Play Store links in large datasets)
+        // Additional wait specifically for iframes to render (with timeout to prevent hanging)
         try {
-            await page.evaluate(async () => {
+            const iframeWaitPromise = page.evaluate(async () => {
                 const iframes = document.querySelectorAll('iframe');
                 if (iframes.length > 0) {
-                    await new Promise(resolve => {
+                    await new Promise((resolve, reject) => {
                         let loaded = 0;
                         const totalIframes = iframes.length;
+                        let timeoutId;
+                        
                         const checkLoaded = () => {
                             loaded++;
                             if (loaded >= totalIframes) {
-                                setTimeout(resolve, 1500); // Extra time after all iframes load
+                                clearTimeout(timeoutId);
+                                setTimeout(resolve, 800); // Reduced from 1500ms
                             }
                         };
+                        
+                        // Overall timeout: max 5 seconds for all iframes
+                        timeoutId = setTimeout(() => {
+                            resolve(); // Force resolve after 5 seconds
+                        }, 5000);
+                        
                         iframes.forEach(iframe => {
                             try {
                                 if (iframe.contentDocument && iframe.contentDocument.readyState === 'complete') {
                                     checkLoaded();
                                 } else {
                                     iframe.onload = checkLoaded;
-                                    // Timeout after 4 seconds per iframe
-                                    setTimeout(checkLoaded, 4000);
+                                    // Timeout after 2 seconds per iframe (reduced from 4)
+                                    setTimeout(checkLoaded, 2000);
                                 }
                             } catch (e) {
                                 // Cross-origin iframe, count as loaded
@@ -460,13 +469,22 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             }
                         });
                         // If no iframes, resolve immediately
-                        if (totalIframes === 0) resolve();
+                        if (totalIframes === 0) {
+                            clearTimeout(timeoutId);
+                            resolve();
+                        }
                     });
                 }
             });
+            
+            // Wrap with timeout to prevent hanging in page.evaluate
+            await Promise.race([
+                iframeWaitPromise,
+                new Promise((resolve) => setTimeout(resolve, 6000)) // 6 second max timeout
+            ]);
         } catch (e) {
-            // If iframe check fails, wait a bit anyway
-            await sleep(1000);
+            // If iframe check fails, continue anyway
+            await sleep(500);
         }
 
         // Random mouse movements for more human-like behavior
@@ -536,17 +554,21 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     
                     if (imgElement) {
                         // Scroll element into view first
-                        await frame.evaluate(el => {
-                            if (el) el.scrollIntoView({ block: 'center', behavior: 'instant' });
-                        }, imgElement);
-                        await sleep(300);
+                        try {
+                            await frame.evaluate(el => {
+                                if (el) el.scrollIntoView({ block: 'center', behavior: 'instant' });
+                            }, imgElement);
+                            await sleep(200);
 
-                        // Hover over the image to ensure it's the correct one
-                        await imgElement.hover();
-                        await sleep(500); // Wait for any hover effects
+                            // Hover over the image with timeout
+                            await Promise.race([
+                                imgElement.hover(),
+                                new Promise((_, reject) => setTimeout(() => reject(new Error('Hover timeout')), 2000))
+                            ]);
+                            await sleep(300); // Reduced from 500ms
 
-                        // Now extract all data from this frame
-                        extractedData = await frame.evaluate(() => {
+                            // Now extract all data from this frame with timeout
+                            const extractPromise = frame.evaluate(() => {
                             const data = {
                                 imageUrl: null,
                                 appName: null,
@@ -628,10 +650,26 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             return data;
                         });
 
-                        // If we found at least the image URL, we have the right frame
-                        if (extractedData && (extractedData.imageUrl || extractedData.appName)) {
-                            console.log(`  ✓ Hover extraction successful!`);
-                            break;
+                            // Wrap extraction with timeout (max 4 seconds)
+                            extractedData = await Promise.race([
+                                extractPromise,
+                                new Promise((resolve) => {
+                                    setTimeout(() => resolve({
+                                        imageUrl: null,
+                                        appName: null,
+                                        appSubtitle: null
+                                    }), 4000);
+                                })
+                            ]);
+
+                            // If we found at least the image URL, we have the right frame
+                            if (extractedData && (extractedData.imageUrl || extractedData.appName)) {
+                                console.log(`  ✓ Hover extraction successful!`);
+                                break;
+                            }
+                        } catch (hoverErr) {
+                            // Hover extraction failed, continue to next frame
+                            continue;
                         }
                     }
                 } catch (e) {
