@@ -463,8 +463,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED', videoId: 'BLOCKED' };
         }
 
-        // Wait for dynamic elements to settle (INCREASED for reliability)
-        const baseWait = 5000 + Math.random() * 3000; // Increased: 5000-8000ms for better iframe loading
+        // Wait for dynamic elements to settle (increased for large datasets)
+        const baseWait = 4000 + Math.random() * 2000; // Increased: 4000-6000ms for better iframe loading
         const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
         await sleep(baseWait * attemptMultiplier);
 
@@ -482,14 +482,14 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             loaded++;
                             if (loaded >= totalIframes) {
                                 clearTimeout(timeoutId);
-                                setTimeout(resolve, 1500); // Increased from 800ms for content to render
+                                setTimeout(resolve, 800); // Reduced from 1500ms
                             }
                         };
 
-                        // Overall timeout: max 8 seconds for all iframes (increased from 5)
+                        // Overall timeout: max 5 seconds for all iframes
                         timeoutId = setTimeout(() => {
-                            resolve(); // Force resolve after 8 seconds
-                        }, 8000);
+                            resolve(); // Force resolve after 5 seconds
+                        }, 5000);
 
                         iframes.forEach(iframe => {
                             try {
@@ -497,8 +497,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                     checkLoaded();
                                 } else {
                                     iframe.onload = checkLoaded;
-                                    // Timeout after 3 seconds per iframe (increased from 2)
-                                    setTimeout(checkLoaded, 3000);
+                                    // Timeout after 2 seconds per iframe (reduced from 4)
+                                    setTimeout(checkLoaded, 2000);
                                 }
                             } catch (e) {
                                 // Cross-origin iframe, count as loaded
@@ -514,14 +514,14 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                 }
             });
 
-            // Wrap with timeout to prevent hanging in page.evaluate (increased to 10 seconds)
+            // Wrap with timeout to prevent hanging in page.evaluate
             await Promise.race([
                 iframeWaitPromise,
-                new Promise((resolve) => setTimeout(resolve, 10000)) // 10 second max timeout
+                new Promise((resolve) => setTimeout(resolve, 6000)) // 6 second max timeout
             ]);
         } catch (e) {
-            // If iframe check fails, wait longer and continue
-            await sleep(2000);
+            // If iframe check fails, continue anyway
+            await sleep(500);
         }
 
         // Random mouse movements for more human-like behavior
@@ -574,206 +574,157 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             const frames = page.frames();
             let extractedData = null;
             let validImageAdFound = false;
-            let extractionAttempts = 0;
-            const MAX_EXTRACTION_ATTEMPTS = 3; // Try multiple times within same page
 
-            // Helper function to extract data from a frame
-            const extractFromFrame = async (frame, useHover = true) => {
-                const data = { imageUrl: null, appName: null, appSubtitle: null };
-
+            for (const frame of frames) {
                 try {
-                    // Get the image element handle
+                    // Validate frame has ONLY the correct image ad structure (title + image + description)
+                    const isValidImageAd = await frame.evaluate(() => {
+                        const img = document.querySelector('img.landscape-image, img#landscape-image, .landscape-image img');
+                        const title = document.querySelector('span.landscape-app-title, span#landscape-app-title, .landscape-app-title');
+                        const desc = document.querySelector('div.landscape-app-text, div#landscape-app-text, .landscape-app-text');
+
+                        if (!img || !title || !desc) return false;
+
+                        // Validate they have content
+                        const titleText = (title.innerText || title.textContent || '').trim();
+                        const descText = (desc.innerText || desc.textContent || '').trim();
+
+                        return titleText.length >= 2 && descText.length >= 2;
+                    });
+
+                    if (!isValidImageAd) {
+                        continue;  // Skip this frame - not a valid image ad
+                    }
+
+                    validImageAdFound = true;
+                    console.log(`  ✅ Found valid image ad structure, extracting...`);
+
+                    // Get the image element handle for hover
                     const imgElement = await frame.$('img.landscape-image, img#landscape-image, .landscape-image img');
 
-                    if (imgElement && useHover) {
+                    if (imgElement) {
                         // Scroll element into view first
                         try {
                             await frame.evaluate(el => {
                                 if (el) el.scrollIntoView({ block: 'center', behavior: 'instant' });
                             }, imgElement);
-                            await sleep(300); // Increased from 200ms
+                            await sleep(200);
 
                             // Hover over the image with timeout
                             await Promise.race([
                                 imgElement.hover(),
-                                new Promise((_, reject) => setTimeout(() => reject(new Error('Hover timeout')), 3000)) // Increased from 2s
+                                new Promise((_, reject) => setTimeout(() => reject(new Error('Hover timeout')), 2000))
                             ]);
-                            await sleep(500); // Increased from 300ms for content to appear
+                            await sleep(300); // Reduced from 500ms
+
+                            // Now extract all data from this frame with timeout
+                            const extractPromise = frame.evaluate(() => {
+                                const data = {
+                                    imageUrl: null,
+                                    appName: null,
+                                    appSubtitle: null
+                                };
+
+                                // =====================================================
+                                // EXTRACT IMAGE URL (from the hovered image)
+                                // =====================================================
+                                const imageSelectors = [
+                                    'img.landscape-image',
+                                    'img#landscape-image',
+                                    '.landscape-image img',
+                                    'img[id*="landscape-image"]',
+                                    'img[class*="landscape-image"]'
+                                ];
+
+                                for (const sel of imageSelectors) {
+                                    const img = document.querySelector(sel);
+                                    if (img && img.src && img.src.startsWith('http')) {
+                                        // Make sure it's the googlesyndication image
+                                        if (img.src.includes('googlesyndication.com/simgad') ||
+                                            img.src.includes('tpc.googlesyndication.com')) {
+                                            data.imageUrl = img.src;
+                                            break;
+                                        }
+                                        // Fallback: any valid image URL
+                                        if (!data.imageUrl) {
+                                            data.imageUrl = img.src;
+                                        }
+                                    }
+                                }
+
+                                // =====================================================
+                                // EXTRACT APP NAME (App Title)
+                                // =====================================================
+                                const appNameSelectors = [
+                                    'span.landscape-app-title',
+                                    'span#landscape-app-title',
+                                    '.landscape-app-title',
+                                    '[id*="landscape-app-title"]',
+                                    '[class*="landscape-app-title"]',
+                                    '.landscape-title-bar span'
+                                ];
+
+                                for (const sel of appNameSelectors) {
+                                    const el = document.querySelector(sel);
+                                    if (el) {
+                                        const text = (el.innerText || el.textContent || '').trim();
+                                        if (text && text.length >= 2 && text.length <= 100) {
+                                            data.appName = text;
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // =====================================================
+                                // EXTRACT APP SUBTITLE (App Text/Description)
+                                // =====================================================
+                                const appSubtitleSelectors = [
+                                    'div.landscape-app-text',
+                                    'div#landscape-app-text',
+                                    '.landscape-app-text',
+                                    '[id*="landscape-app-text"]',
+                                    '[class*="landscape-app-text"]'
+                                ];
+
+                                for (const sel of appSubtitleSelectors) {
+                                    const el = document.querySelector(sel);
+                                    if (el) {
+                                        const text = (el.innerText || el.textContent || '').trim();
+                                        if (text && text.length >= 2 && text.length <= 200) {
+                                            data.appSubtitle = text;
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                return data;
+                            });
+
+                            // Wrap extraction with timeout (max 4 seconds)
+                            extractedData = await Promise.race([
+                                extractPromise,
+                                new Promise((resolve) => {
+                                    setTimeout(() => resolve({
+                                        imageUrl: null,
+                                        appName: null,
+                                        appSubtitle: null
+                                    }), 4000);
+                                })
+                            ]);
+
+                            // If we found at least the image URL, we have the right frame
+                            if (extractedData && (extractedData.imageUrl || extractedData.appName)) {
+                                console.log(`  ✓ Hover extraction successful!`);
+                                break;
+                            }
                         } catch (hoverErr) {
-                            // Hover failed, continue with extraction anyway
-                            console.log(`  ⚠️ Hover failed, trying direct extraction...`);
+                            // Hover extraction failed, continue to next frame
+                            continue;
                         }
                     }
-
-                    // Extract data from frame
-                    const extractPromise = frame.evaluate(() => {
-                        const result = {
-                            imageUrl: null,
-                            appName: null,
-                            appSubtitle: null
-                        };
-
-                        // =====================================================
-                        // EXTRACT IMAGE URL (from the hovered image)
-                        // =====================================================
-                        const imageSelectors = [
-                            'img.landscape-image',
-                            'img#landscape-image',
-                            '.landscape-image img',
-                            'img[id*="landscape-image"]',
-                            'img[class*="landscape-image"]'
-                        ];
-
-                        for (const sel of imageSelectors) {
-                            const img = document.querySelector(sel);
-                            if (img && img.src && img.src.startsWith('http')) {
-                                // Make sure it's the googlesyndication image
-                                if (img.src.includes('googlesyndication.com/simgad') ||
-                                    img.src.includes('tpc.googlesyndication.com')) {
-                                    result.imageUrl = img.src;
-                                    break;
-                                }
-                                // Fallback: any valid image URL
-                                if (!result.imageUrl) {
-                                    result.imageUrl = img.src;
-                                }
-                            }
-                        }
-
-                        // =====================================================
-                        // EXTRACT APP NAME (App Title)
-                        // =====================================================
-                        const appNameSelectors = [
-                            'span.landscape-app-title',
-                            'span#landscape-app-title',
-                            '.landscape-app-title',
-                            '[id*="landscape-app-title"]',
-                            '[class*="landscape-app-title"]',
-                            '.landscape-title-bar span'
-                        ];
-
-                        for (const sel of appNameSelectors) {
-                            const el = document.querySelector(sel);
-                            if (el) {
-                                const text = (el.innerText || el.textContent || '').trim();
-                                if (text && text.length >= 2 && text.length <= 100) {
-                                    result.appName = text;
-                                    break;
-                                }
-                            }
-                        }
-
-                        // =====================================================
-                        // EXTRACT APP SUBTITLE (App Text/Description)
-                        // =====================================================
-                        const appSubtitleSelectors = [
-                            'div.landscape-app-text',
-                            'div#landscape-app-text',
-                            '.landscape-app-text',
-                            '[id*="landscape-app-text"]',
-                            '[class*="landscape-app-text"]'
-                        ];
-
-                        for (const sel of appSubtitleSelectors) {
-                            const el = document.querySelector(sel);
-                            if (el) {
-                                const text = (el.innerText || el.textContent || '').trim();
-                                if (text && text.length >= 2 && text.length <= 200) {
-                                    result.appSubtitle = text;
-                                    break;
-                                }
-                            }
-                        }
-
-                        return result;
-                    });
-
-                    // Wrap extraction with timeout (max 6 seconds - increased from 4)
-                    const extracted = await Promise.race([
-                        extractPromise,
-                        new Promise((resolve) => {
-                            setTimeout(() => resolve({
-                                imageUrl: null,
-                                appName: null,
-                                appSubtitle: null
-                            }), 6000);
-                        })
-                    ]);
-
-                    return extracted;
                 } catch (e) {
-                    return data;
-                }
-            };
-
-            // Try extraction multiple times if needed
-            while (extractionAttempts < MAX_EXTRACTION_ATTEMPTS && !extractedData?.imageUrl) {
-                extractionAttempts++;
-
-                if (extractionAttempts > 1) {
-                    console.log(`  🔄 Extraction attempt ${extractionAttempts}/${MAX_EXTRACTION_ATTEMPTS}...`);
-                    await sleep(1500); // Wait before retry
-                }
-
-                for (const frame of frames) {
-                    try {
-                        // Validate frame has ONLY the correct image ad structure (title + image + description)
-                        const isValidImageAd = await Promise.race([
-                            frame.evaluate(() => {
-                                const img = document.querySelector('img.landscape-image, img#landscape-image, .landscape-image img');
-                                const title = document.querySelector('span.landscape-app-title, span#landscape-app-title, .landscape-app-title');
-                                const desc = document.querySelector('div.landscape-app-text, div#landscape-app-text, .landscape-app-text');
-
-                                if (!img || !title || !desc) return false;
-
-                                // Validate they have content
-                                const titleText = (title.innerText || title.textContent || '').trim();
-                                const descText = (desc.innerText || desc.textContent || '').trim();
-
-                                return titleText.length >= 2 && descText.length >= 2;
-                            }),
-                            new Promise((resolve) => setTimeout(() => resolve(false), 3000)) // 3s timeout for validation
-                        ]);
-
-                        if (!isValidImageAd) {
-                            continue;  // Skip this frame - not a valid image ad
-                        }
-
-                        validImageAdFound = true;
-                        console.log(`  ✅ Found valid image ad structure, extracting (attempt ${extractionAttempts})...`);
-
-                        // Try with hover first
-                        extractedData = await extractFromFrame(frame, true);
-
-                        // If hover extraction didn't get all data, try without hover
-                        if (!extractedData?.imageUrl || !extractedData?.appName || !extractedData?.appSubtitle) {
-                            console.log(`  🔄 Partial data, trying direct extraction...`);
-                            await sleep(500);
-                            const directData = await extractFromFrame(frame, false);
-
-                            // Merge results - prefer existing data but fill in missing
-                            if (directData) {
-                                extractedData = extractedData || {};
-                                extractedData.imageUrl = extractedData.imageUrl || directData.imageUrl;
-                                extractedData.appName = extractedData.appName || directData.appName;
-                                extractedData.appSubtitle = extractedData.appSubtitle || directData.appSubtitle;
-                            }
-                        }
-
-                        // If we found at least the image URL and app name, we're good
-                        if (extractedData && extractedData.imageUrl && extractedData.appName) {
-                            console.log(`  ✓ Extraction successful!`);
-                            break;
-                        }
-                    } catch (e) {
-                        // Frame access error, continue to next frame
-                        continue;
-                    }
-                }
-
-                // If we got data, break retry loop
-                if (extractedData?.imageUrl && extractedData?.appName) {
-                    break;
+                    // Frame access error, continue to next frame
+                    continue;
                 }
             }
 
@@ -802,7 +753,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     imageUrl: 'SKIP'
                 };
             } else {
-                console.log(`  ⚠️ No image ad data extracted after ${extractionAttempts} attempts`);
+                console.log(`  ⚠️ No image ad data extracted`);
             }
 
             // Set video ID to SKIP for image ads (not applicable)
